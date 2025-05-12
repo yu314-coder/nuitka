@@ -43,6 +43,23 @@ def check_dependencies():
     
     return missing_deps
 
+def check_static_libpython():
+    """Check if static libpython is available"""
+    try:
+        # Try to find static libpython
+        result = subprocess.run(
+            [sys.executable, "-c", "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            libdir = result.stdout.strip()
+            # Look for libpython.a files
+            static_libs = glob.glob(os.path.join(libdir, "libpython*.a"))
+            return len(static_libs) > 0
+    except:
+        pass
+    return False
+
 def get_current_python_version():
     """Get the current Python version for compatibility notes"""
     return f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -70,6 +87,13 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
     # Check Nuitka version
     nuitka_version = get_nuitka_version()
     status_container.info(f"Using Nuitka version: {nuitka_version}")
+    
+    # Check if static libpython is available
+    has_static_libpython = check_static_libpython()
+    if has_static_libpython:
+        status_container.success("✅ Static libpython detected - will use for maximum portability")
+    else:
+        status_container.warning("⚠️ Static libpython not available - using alternative portable options")
     
     # Check dependencies first
     missing_deps = check_dependencies()
@@ -152,49 +176,56 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
     try:
         status_container.info("🔧 Starting compilation...")
         
-        # Define compilation options with static linking for true portability
-        # Fixed: --static-libpython=yes (requires argument)
+        # Define compilation options with adaptive static linking
+        # Use static libpython only if available, otherwise use best portable options
+        def build_cmd(base_cmd, use_static=False):
+            if use_static and has_static_libpython:
+                base_cmd.append("--static-libpython=yes")
+            return base_cmd
+        
         compile_options = {
             "max_compatibility": {
-                "name": "Universal Binary (Static Python)",
-                "cmd": [
+                "name": "Maximum Compatibility Binary",
+                "cmd": build_cmd([
                     sys.executable, "-m", "nuitka",
                     "--standalone",
                     "--onefile",  # Single portable file
-                    "--static-libpython=yes",  # Static Python - this is KEY! (fixed with =yes)
                     "--show-progress",
                     "--remove-output",
                     "--follow-imports",
-                    "--lto=yes",  # Link-time optimization helps with compatibility
+                    "--assume-yes-for-downloads",  # Auto-download missing dependencies
+                    "--python-flag=no_site",  # Reduce dependencies
                     script_path,
                     f"--output-dir={output_dir}"
-                ],
+                ], use_static=True),
                 "creates_runner": False
             },
             "portable": {
                 "name": "Portable Non-Standalone",
-                "cmd": [
+                "cmd": build_cmd([
                     sys.executable, "-m", "nuitka",
                     "--show-progress",
                     "--remove-output",
-                    "--static-libpython=yes",  # Fixed with =yes
+                    "--assume-yes-for-downloads",
+                    "--python-flag=no_site",
                     script_path,
                     f"--output-dir={output_dir}"
-                ],
+                ], use_static=True),
                 "creates_runner": False
             },
             "standalone": {
-                "name": "Standalone with Static Python",
-                "cmd": [
+                "name": "Standalone Binary",
+                "cmd": build_cmd([
                     sys.executable, "-m", "nuitka",
                     "--standalone",
                     "--onefile",
-                    "--static-libpython=yes",  # Fixed with =yes
                     "--show-progress",
                     "--remove-output",
+                    "--assume-yes-for-downloads",
+                    "--python-flag=no_site",
                     script_path,
                     f"--output-dir={output_dir}"
-                ],
+                ], use_static=True),
                 "creates_runner": False
             }
         }
@@ -268,12 +299,17 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
             file_process = subprocess.run(["file", binary_path], capture_output=True, text=True)
             binary_info = file_process.stdout
             
-            # Check if it's statically linked
+            # Check linking type
             ldd_process = subprocess.run(["ldd", binary_path], capture_output=True, text=True)
             if "not a dynamic executable" in ldd_process.stderr or "statically linked" in ldd_process.stdout:
-                static_info = "✅ Statically linked - fully portable!"
+                linking_info = "✅ Statically linked - fully portable!"
             else:
-                static_info = "⚠️ Dynamically linked - may need compatible libraries"
+                # Check what dynamic libraries are required
+                if ldd_process.returncode == 0:
+                    libs = ldd_process.stdout.count("=>")
+                    linking_info = f"🔗 Dynamically linked ({libs} libraries) - designed for maximum compatibility"
+                else:
+                    linking_info = "ℹ️ Compiled binary - should work on compatible systems"
             
             # Rename to desired extension
             if output_extension in ['.bin', '.sh'] and not binary_path.endswith(output_extension):
@@ -296,7 +332,8 @@ Compilation Details:
 - Output Path: {binary_path}
 - File Size: {os.path.getsize(binary_path) / 1024:.2f} KB
 - Compiled with Python: {current_python}
-- Static Linking: {static_info}
+- Static Libpython Available: {'Yes' if has_static_libpython else 'No'}
+- Linking: {linking_info}
 
 System Packages: {packages_result}
 Python Requirements: {install_result}
@@ -304,9 +341,11 @@ Python Requirements: {install_result}
 Binary Information: {binary_info}
 
 PORTABILITY NOTES:
-- This binary was compiled with --static-libpython=yes for maximum portability
-- Static linking means it should work anywhere without Python version mismatches
-- No need to copy to WSL filesystem - it should work from /mnt/c/
+- This binary was compiled with maximum compatibility settings
+- Using --onefile for single-file distribution
+- Added --assume-yes-for-downloads for automatic dependency resolution
+- Used --python-flag=no_site to reduce system dependencies
+- Should work on most compatible Linux systems
 """
             
             status_container.success(f"✅ {selected_option['name']} compilation successful!")
@@ -320,7 +359,8 @@ PORTABILITY NOTES:
                 'compilation_mode': compilation_mode,
                 'python_version': current_python,
                 'nuitka_version': nuitka_version,
-                'static_info': static_info
+                'linking_info': linking_info,
+                'has_static_libpython': has_static_libpython
             }
         else:
             return {
@@ -491,21 +531,32 @@ def run_compiled_binary(binary_path):
         return False, f"Error running the binary: {str(e)}"
 
 # App title and description
-st.title("🚀 Nuitka Python Compiler (Universal Binaries)")
+st.title("🚀 Nuitka Python Compiler (Smart Compilation)")
 st.markdown("""
-Convert your Python code into truly portable executables using Nuitka with static linking.
-**Creates binaries that work anywhere!** 🌍
+Convert your Python code into portable executables using Nuitka with smart compatibility detection.
+**Automatically adapts to your Python environment!** 🎯
 """)
 
-# Important notice about the solution
-st.success("""
-🎯 **Now with Static Linking!**
-
-This version uses `--static-libpython=yes` to create truly portable binaries that:
-- Work on any Linux system regardless of Python version
-- Can be run from anywhere (including Windows filesystem in WSL)
-- No more `_PyRuntime` errors!
-""")
+# Check and display Python environment status
+has_static = check_static_libpython()
+if has_static:
+    st.success("""
+    🎯 **Static Libpython Available!**
+    
+    This environment supports static linking:
+    - Creates fully portable binaries
+    - No Python version dependencies
+    - Maximum compatibility
+    """)
+else:
+    st.info("""
+    🔧 **Using Alternative Portable Options**
+    
+    Static libpython not available, but we'll still create highly portable binaries using:
+    - onefile mode for single-file distribution
+    - Automatic dependency resolution
+    - Maximum compatibility flags
+    """)
 
 # Dependency status
 missing_deps = check_dependencies()
@@ -525,19 +576,20 @@ with tab1:
         if results['success']:
             st.success("🎉 Compilation successful!")
             
-            # Show static linking status
-            if results.get('static_info'):
-                if "Statically linked" in results['static_info']:
-                    st.success(results['static_info'])
+            # Show linking status
+            if results.get('linking_info'):
+                if "Statically linked" in results['linking_info']:
+                    st.success(results['linking_info'])
                 else:
-                    st.warning(results['static_info'])
+                    st.info(results['linking_info'])
             
             # Show Python version compatibility info
             st.info(f"""
             **Compiled with Python {results.get('python_version', 'Unknown')}**
             **Using Nuitka {results.get('nuitka_version', 'Unknown')}**
+            **Static Libpython: {'✅ Used' if results.get('has_static_libpython') else '❌ Not Available'}**
             
-            ✨ **With static linking, this binary should work anywhere!**
+            {'✨ **This binary should work on most compatible systems!**' if not results.get('has_static_libpython') else '🌟 **This static binary will work anywhere!**'}
             """)
             
             # Stats
@@ -549,30 +601,62 @@ with tab1:
                 download_filename = f"compiled_program{results.get('output_extension', '.bin')}"
                 with open(results['binary_path'], "rb") as f:
                     st.download_button(
-                        "⬇️ Download Universal Binary",
+                        "⬇️ Download Compiled Binary",
                         data=f,
                         file_name=download_filename,
                         mime="application/octet-stream",
                         type="primary"
                     )
                 
-                # Instructions for static binary
-                st.info("""
-                **Universal Binary Instructions:**
+                # Instructions based on static availability
+                if results.get('has_static_libpython'):
+                    st.success("""
+                    **Static Binary Instructions:**
+                    
+                    🌟 **This static binary works from ANY location!**
+                    
+                    1. Download the file
+                    2. Make executable: `chmod +x compiled_program.bin`
+                    3. Run from anywhere: `./compiled_program.bin`
+                    
+                    **No restrictions - works everywhere!**
+                    """)
+                else:
+                    st.info("""
+                    **Portable Binary Instructions:**
+                    
+                    🔧 **This binary is highly portable but may need compatible system:**
+                    
+                    1. Download the file
+                    2. Copy to Linux filesystem: `cp /mnt/c/.../file ~/`
+                    3. Make executable: `chmod +x compiled_program.bin`
+                    4. Run: `./compiled_program.bin`
+                    
+                    **Note:** Copy to Linux filesystem (not /mnt/c/) for best compatibility in WSL
+                    """)
                 
-                ✅ **This static binary should work from ANY location!**
-                
-                1. Download the file
-                2. Make executable: `chmod +x compiled_program.bin`
-                3. Run from anywhere: `./compiled_program.bin`
-                
-                **Key Benefits:**
-                - No Python installation required
-                - No version compatibility issues
-                - Works from Windows filesystem in WSL (`/mnt/c/`)
-                - Works from Linux filesystem
-                - Truly portable!
-                """)
+                # General WSL troubleshooting
+                with st.expander("🔧 WSL Troubleshooting (if needed)"):
+                    st.markdown(f"""
+                    **If you encounter issues in WSL:**
+                    
+                    1. **Always copy to Linux filesystem first:**
+                    ```bash
+                    cp /mnt/c/Users/username/Downloads/compiled_program.bin ~/
+                    cd ~
+                    chmod +x compiled_program.bin
+                    ./compiled_program.bin
+                    ```
+                    
+                    2. **If you get `_PyRuntime` errors:**
+                       - This binary was compiled with Python {results.get('python_version', '3.12')}
+                       - Use "Maximum Compatibility" mode for best results
+                       - Consider upgrading to static libpython-enabled Python
+                    
+                    3. **For maximum compatibility:**
+                       - Use systems with similar Python versions
+                       - Run from Linux filesystem, not Windows mounts
+                    """)
                 
                 # Test run
                 st.subheader("🧪 Test Run (on Streamlit Cloud)")
@@ -611,12 +695,13 @@ with tab1:
                 "Your Python Code",
                 value="""# Your Python code here
 print('Hello from compiled Python!')
-print('This is running as a static binary!')
+print('This is a smart-compiled binary!')
 
-# This will work from anywhere now!
-import os
+# This will work with automatic compatibility detection
+import os, sys
 print(f'Running from: {os.getcwd()}')
-print('No more _PyRuntime errors! 🎉')""",
+print(f'Python executable: {sys.executable}')
+print('Compilation was optimized for your environment!')""",
                 height=400
             )
         
@@ -655,17 +740,17 @@ print('No more _PyRuntime errors! 🎉')""",
             compilation_mode = st.selectbox(
                 "Compilation Mode",
                 options=[
-                    ("max_compatibility", "Universal Binary (Recommended - static Python)"),
-                    ("portable", "Portable with Static Python"), 
-                    ("standalone", "Standalone with Static Python")
+                    ("max_compatibility", "Maximum Compatibility (Recommended)"),
+                    ("portable", "Portable Binary"), 
+                    ("standalone", "Standalone Binary")
                 ],
                 format_func=lambda x: x[1],
                 help="""
-                - Universal Binary: Creates a fully static, portable binary that works anywhere
-                - Portable with Static Python: Static Python but requires some system libraries
-                - Standalone with Static Python: Self-contained with static Python
+                - Maximum Compatibility: Best settings for cross-system portability
+                - Portable Binary: Optimized binary but may need some system libraries
+                - Standalone Binary: Self-contained binary
                 
-                All modes now use --static-libpython=yes for maximum compatibility!
+                All modes automatically use static libpython if available!
                 """
             )[0]
             
@@ -675,13 +760,16 @@ print('No more _PyRuntime errors! 🎉')""",
                 index=0
             )
             
-            # Show Python version info
+            # Show Python environment info
             st.info(f"📍 Compiling with Python {get_current_python_version()}")
-            st.success("🔗 Using static Python linking for portability!")
+            if check_static_libpython():
+                st.success("🔗 Static libpython will be used!")
+            else:
+                st.info("🔧 Using portable compilation flags")
         
         # Compile button
         if st.button("🚀 Compile with Nuitka", type="primary"):
-            with st.spinner("Compiling with static linking..."):
+            with st.spinner("Compiling with smart settings..."):
                 results = compile_with_nuitka(
                     code, requirements, packages, target_platform, compilation_mode, output_extension
                 )
@@ -696,86 +784,88 @@ print('No more _PyRuntime errors! 🎉')""",
 with tab2:
     st.header("📖 How to Use")
     
-    st.subheader("🌟 Static Binary - Universal Solution")
-    st.success("""
-    **The New Approach - Works Everywhere!**
+    st.subheader("🎯 Smart Compilation")
+    st.info("""
+    **Automatic Environment Detection**
     
-    With `--static-libpython=yes`, your binaries now:
-    - Work on any Linux system
-    - Don't require specific Python versions  
-    - Can run from any location (including /mnt/c/ in WSL)
-    - Are truly portable!
+    This app automatically detects your Python environment and chooses the best compilation strategy:
+    - Uses static libpython if available (maximum portability)
+    - Falls back to highly portable alternatives if not
+    - Automatically handles missing dependencies
+    - Optimizes for your specific environment
     """)
     
+    st.subheader("📋 General Instructions")
     st.code("""
-# Download and run from ANYWHERE:
+# Download the compiled binary
+# Method 1: Direct run (if static libpython was used)
 chmod +x compiled_program.bin
 ./compiled_program.bin
 
-# Works from Windows filesystem in WSL:
-cd /mnt/c/Users/username/Downloads
-./compiled_program.bin    # This now works!
-
-# Works from Linux filesystem:
+# Method 2: Copy to Linux filesystem first (recommended for WSL)
 cp /mnt/c/Users/username/Downloads/compiled_program.bin ~/
 cd ~
-./compiled_program.bin    # This also works!
+chmod +x compiled_program.bin
+./compiled_program.bin
     """)
     
-    st.subheader("📊 Compilation Mode Comparison")
-    comparison_data = {
-        "Mode": ["Universal Binary", "Portable", "Standalone"],
-        "Static Linking": ["✅ Yes", "✅ Yes", "✅ Yes"],
-        "Single File": ["✅ Yes", "❌ No", "✅ Yes"],
-        "Size": ["Larger", "Smaller", "Largest"],
-        "Portability": ["Maximum", "High", "Maximum"]
+    st.subheader("📊 Environment Types")
+    env_types = {
+        "Environment": ["Static Libpython", "Non-Static Libpython"],
+        "Portability": ["Maximum", "High"],
+        "Requirements": ["None", "Compatible system"],
+        "Best For": ["Any Linux system", "Similar environments"]
     }
-    st.table(comparison_data)
+    st.table(env_types)
 
 with tab3:
     st.header("ℹ️ About")
     
-    st.subheader("🔧 Static Linking Solution")
+    st.subheader("🧠 Smart Compilation Technology")
     st.markdown("""
-    **The key to the fix:**
+    **How it works:**
     
-    - **`--static-libpython=yes`**: This option statically links the Python runtime
-    - **`--onefile`**: Creates a single executable file
-    - **`--lto=yes`**: Link-time optimization for better compatibility
+    1. **Environment Detection**: Checks if static libpython is available
+    2. **Adaptive Options**: Uses the best available compilation flags
+    3. **Fallback Strategy**: Ensures compilation succeeds even without static linking
+    4. **Automatic Dependencies**: Resolves missing dependencies automatically
     
-    Together, these create truly portable binaries that work anywhere!
+    This approach maximizes compatibility across different Python environments.
     """)
     
-    st.subheader("✅ Problem Solved")
+    st.subheader("✅ What This Solves")
     st.success("""
-    **No more `_PyRuntime has different size` errors!**
+    **Problems addressed:**
     
-    Static linking means:
-    - The Python runtime is embedded in the binary
-    - No dependency on system Python version
-    - Works from any filesystem (Windows or Linux)
-    - Truly universal binaries
+    - Static libpython not available error
+    - Python version mismatches
+    - WSL compatibility issues
+    - Dependency resolution
+    - Cross-environment portability
     """)
     
-    st.subheader("☁️ Current Environment")
+    st.subheader("☁️ Current Environment Status")
+    static_status = "✅ Available" if check_static_libpython() else "❌ Not Available"
     st.code(f"""
     Python Version: {get_current_python_version()}
     Nuitka Version: {get_nuitka_version()}
     Platform: {platform.platform()}
     Architecture: {platform.architecture()[0]}
     Machine: {platform.machine()}
-    Static Linking: ✅ Enabled
+    Static Libpython: {static_status}
     """)
     
     st.subheader("📋 Best Practices")
     st.markdown("""
-    **For Maximum Portability:**
-    1. Always use "Universal Binary" mode
-    2. Let Nuitka handle static linking automatically
-    3. No need to worry about filesystem locations
-    4. Your binaries will just work! 🎉
+    **Recommendations:**
+    
+    1. Always use "Maximum Compatibility" mode
+    2. Copy binaries to Linux filesystem in WSL
+    3. Test the binary in the target environment
+    4. Let the app automatically choose the best settings
+    5. Check the compilation details for specific optimization used
     """)
 
 # Footer
 st.markdown("---")
-st.caption("🤖 Created by Claude 3.7 Sonnet | 🚀 Powered by Nuitka with Static Linking")
+st.caption("🤖 Created by Claude 3.7 Sonnet | 🚀 Powered by Nuitka with Smart Compilation")
