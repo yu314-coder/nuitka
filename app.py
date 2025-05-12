@@ -40,6 +40,22 @@ def fix_line_endings(file_path):
         st.warning(f"Could not fix line endings: {str(e)}")
         return False
 
+def check_dependencies():
+    """Check if required dependencies are available"""
+    missing_deps = []
+    
+    # Check for patchelf
+    result = subprocess.run(["which", "patchelf"], capture_output=True)
+    if result.returncode != 0:
+        missing_deps.append("patchelf")
+    
+    # Check for gcc
+    result = subprocess.run(["which", "gcc"], capture_output=True)
+    if result.returncode != 0:
+        missing_deps.append("gcc")
+    
+    return missing_deps
+
 def run_compiled_binary(binary_path):
     """Run the compiled binary and return the output"""
     try:
@@ -110,6 +126,15 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
     status = st.empty()
     status_container = st.container()
     status_container.info("Starting compilation process...")
+    
+    # Check dependencies first
+    missing_deps = check_dependencies()
+    if missing_deps:
+        error_msg = f"Required dependencies are missing: {', '.join(missing_deps)}\n"
+        error_msg += "On Streamlit Cloud, these dependencies are not available, so standalone compilation is not possible.\n"
+        error_msg += "Consider using a different deployment platform with full Linux environment support."
+        status_container.error(error_msg)
+        return "Missing dependencies", error_msg, None, None
     
     # Create unique ID for this compilation
     job_id = str(uuid.uuid4())
@@ -190,95 +215,116 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
         # Define the output filename with chosen extension
         output_filename = f"user_script{output_extension}"
         
-        # Use the exact command format provided, adapted to our variables
-        compile_cmd = [
-            sys.executable, "-m", "nuitka",
-            "--onefile",
-            "--show-progress",
-            "--show-modules",
-            script_path,
-            f"--output-filename={output_filename}",
-            f"--output-dir={output_dir}"
+        # Try different compilation modes in order of preference
+        # First, try with onefile (if patchelf is available)
+        # Then try without onefile
+        compile_attempts = [
+            {
+                "name": "Standalone Onefile",
+                "cmd": [
+                    sys.executable, "-m", "nuitka",
+                    "--onefile",
+                    "--show-progress",
+                    "--show-modules",
+                    script_path,
+                    f"--output-filename={output_filename}",
+                    f"--output-dir={output_dir}"
+                ]
+            },
+            {
+                "name": "Non-standalone",
+                "cmd": [
+                    sys.executable, "-m", "nuitka",
+                    "--show-progress",
+                    "--show-modules",
+                    script_path,
+                    f"--output-filename={output_filename}",
+                    f"--output-dir={output_dir}"
+                ]
+            }
         ]
         
-        status_container.info(f"Starting compilation with command:\n{' '.join(compile_cmd)}")
-        
-        # Start the process 
-        process = subprocess.Popen(
-            compile_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
-        
-        # Create a progress bar
-        progress_bar = st.progress(0)
-        
-        # Collect output with progress tracking
-        compile_output = ""
-        output_buffer = []
-        line_count = 0
-        total_lines_estimate = 500  # Rough estimate
-        
-        # Display compilation progress in real-time
-        for line in iter(process.stdout.readline, ''):
-            compile_output += line
-            output_buffer.append(line)
-            line_count += 1
+        for attempt in compile_attempts:
+            status_container.info(f"Attempting {attempt['name']} compilation...")
+            status_container.info(f"Command: {' '.join(attempt['cmd'])}")
             
-            # Only keep the last 20 lines for display
-            if len(output_buffer) > 20:
-                output_buffer.pop(0)
-            
-            # Estimate progress
-            progress = min(line_count / total_lines_estimate, 0.99)
-            progress_bar.progress(progress)
-            
-            # Update status with recent output
-            status_container.text(f"Compilation in progress...\n\n{''.join(output_buffer)}")
-        
-        # Complete the progress bar
-        progress_bar.progress(1.0)
-        
-        # Process has finished
-        process.wait()
-        
-        status_container.info(f"Compilation finished with exit code: {process.returncode}")
-        
-        # The binary path
-        binary_path = os.path.join(output_dir, output_filename)
-        
-        # Execute file command to determine the type of the generated binary
-        binary_info = "Binary file not found."
-        if os.path.exists(binary_path):
-            file_process = subprocess.run(
-                ["file", binary_path],
-                capture_output=True,
-                text=True
+            # Start the process 
+            process = subprocess.Popen(
+                attempt['cmd'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
             )
-            binary_info = file_process.stdout
-            status_container.info(f"Binary information: {binary_info}")
-        else:
-            status_container.error(binary_info)
+            
+            # Create a progress bar
+            progress_bar = st.progress(0)
+            
+            # Collect output with progress tracking
+            compile_output = ""
+            output_buffer = []
+            line_count = 0
+            total_lines_estimate = 500  # Rough estimate
+            
+            # Display compilation progress in real-time
+            for line in iter(process.stdout.readline, ''):
+                compile_output += line
+                output_buffer.append(line)
+                line_count += 1
+                
+                # Only keep the last 20 lines for display
+                if len(output_buffer) > 20:
+                    output_buffer.pop(0)
+                
+                # Estimate progress
+                progress = min(line_count / total_lines_estimate, 0.99)
+                progress_bar.progress(progress)
+                
+                # Update status with recent output
+                status_container.text(f"Compilation in progress ({attempt['name']})...\n\n{''.join(output_buffer)}")
+            
+            # Complete the progress bar
+            progress_bar.progress(1.0)
+            
+            # Process has finished
+            process.wait()
+            
+            status_container.info(f"Compilation finished with exit code: {process.returncode}")
+            
+            # The binary path
+            binary_path = os.path.join(output_dir, output_filename)
+            
+            # Check if compilation was successful
+            if process.returncode == 0 and os.path.exists(binary_path):
+                # Execute file command to determine the type of the generated binary
+                file_process = subprocess.run(
+                    ["file", binary_path],
+                    capture_output=True,
+                    text=True
+                )
+                binary_info = file_process.stdout
+                status_container.info(f"Binary information: {binary_info}")
+                
+                # Make the binary executable
+                os.chmod(binary_path, 0o755)
+                
+                # Fix line endings for shell scripts
+                if binary_path.endswith(".sh"):
+                    fix_line_endings(binary_path)
+                
+                status_container.success(f"Compilation complete ({attempt['name']})! You can download the executable now.")
+                
+                # Return the binary directly
+                return install_result, compile_output, binary_path, binary_info
+            else:
+                status_container.warning(f"{attempt['name']} compilation failed, trying next method...")
+                continue
         
-        # Check if compilation was successful
-        if os.path.exists(binary_path):
-            # Make the binary executable
-            os.chmod(binary_path, 0o755)
-            
-            # Fix line endings for shell scripts
-            if binary_path.endswith(".sh"):
-                fix_line_endings(binary_path)
-            
-            status_container.success("Compilation complete! You can download the executable now.")
-            
-            # Return the binary directly
-            return install_result, compile_output, binary_path, binary_info
-        else:
-            status_container.error("Compilation failed. Could not find executable file.")
-            return install_result, f"{compile_output}\n\nCompilation failed. See output for details.", None, binary_info
+        # If we get here, all attempts failed
+        status_container.error("All compilation attempts failed. Could not find executable file.")
+        return install_result, f"{compile_output}\n\nAll compilation attempts failed. See output for details.", None, "Binary compilation failed."
+        
     except Exception as e:
         status_container.error(f"Error during compilation: {str(e)}")
         return install_result, f"Error during compilation: {str(e)}", None, "Binary compilation failed."
@@ -289,6 +335,16 @@ st.markdown("""
 This tool compiles your Python code into a single executable file using Nuitka.
 **Note:** This version only supports Linux compilation due to Streamlit Cloud limitations.
 """)
+
+# Check for missing dependencies at startup
+missing_deps = check_dependencies()
+if missing_deps:
+    st.error(f"""
+    ⚠️ **Missing Dependencies:** {', '.join(missing_deps)}
+    
+    Streamlit Cloud doesn't include all required system packages for Nuitka compilation.
+    You may still be able to compile using non-standalone mode, but standalone executables require these packages.
+    """)
 
 # Create tabs for different sections
 tab1, tab2, tab3 = st.tabs(["Compiler", "How to Use", "About"])
@@ -436,6 +492,8 @@ with tab2:
     4. Cleans up after execution
     
     This makes distribution simple - just share this one file!
+    
+    **Note:** On Streamlit Cloud, standalone mode may not work due to missing system dependencies.
     """)
 
 with tab3:
@@ -464,15 +522,31 @@ with tab3:
     - Includes all Python dependencies 
     - Real-time progress tracking
     - Test execution of compiled binaries
+    - Fallback to non-standalone mode if dependencies are missing
     
     **Limitations:**
     - Only Linux compilation is supported
     - System packages cannot be installed
     - Windows compilation is not available
+    - Some system dependencies (like patchelf) may be missing
     - Some advanced Nuitka features may not be supported
     
-    **Note:** For Windows compilation support, consider using the Docker/Hugging Face Spaces version of this tool.
+    **Note:** For Windows compilation support and full system dependency availability, consider using the Docker/Hugging Face Spaces version of this tool.
     """)
+    
+    # Dependency status
+    st.subheader("System Dependencies Status")
+    missing_deps = check_dependencies()
+    if missing_deps:
+        st.error(f"Missing dependencies: {', '.join(missing_deps)}")
+        st.markdown("""
+        **Impact:**
+        - Standalone compilation may fail
+        - Non-standalone compilation should still work
+        - Executables may require Python runtime on target system
+        """)
+    else:
+        st.success("All required dependencies are available!")
 
 # Footer
 st.markdown("---")
