@@ -8,6 +8,7 @@ import platform
 import time
 from pathlib import Path
 import tempfile
+import glob
 
 # Set page configuration
 st.set_page_config(
@@ -120,10 +121,60 @@ def run_compiled_binary(binary_path):
     except Exception as e:
         return False, f"Error running the binary: {str(e)}"
 
+def format_compilation_log(log_text):
+    """Format compilation log for better readability"""
+    lines = log_text.splitlines()
+    formatted_lines = []
+    
+    for line in lines:
+        # Skip very repetitive lines
+        if "Setting 'RPATH' value" in line:
+            # Only show first few RPATH messages
+            if len([l for l in formatted_lines if "Setting 'RPATH'" in l]) < 3:
+                formatted_lines.append("  " + line)
+            elif len([l for l in formatted_lines if "Setting 'RPATH'" in l]) == 3:
+                formatted_lines.append("  ... (setting RPATH for multiple shared libraries)")
+        elif line.startswith("Nuitka"):
+            formatted_lines.append("✓ " + line)
+        elif "error" in line.lower() or "failed" in line.lower():
+            formatted_lines.append("❌ " + line)
+        elif "success" in line.lower():
+            formatted_lines.append("✅ " + line)
+        else:
+            formatted_lines.append("  " + line)
+    
+    return "\n".join(formatted_lines[-50:])  # Only show last 50 lines
+
+def find_compiled_binary(output_dir, output_filename):
+    """Find the compiled binary, checking different possible paths"""
+    # Try direct path first
+    direct_path = os.path.join(output_dir, output_filename)
+    if os.path.exists(direct_path):
+        return direct_path
+    
+    # Try in .dist folder (standalone builds)
+    dist_path = os.path.join(output_dir, "user_script.dist", output_filename)
+    if os.path.exists(dist_path):
+        return dist_path
+    
+    # Try using glob to find any executable
+    patterns = [
+        os.path.join(output_dir, "**", output_filename),
+        os.path.join(output_dir, "**", "user_script"),
+        os.path.join(output_dir, "**", "*.bin"),
+        os.path.join(output_dir, "**", "*.exe")
+    ]
+    
+    for pattern in patterns:
+        matches = glob.glob(pattern, recursive=True)
+        if matches:
+            return matches[0]
+    
+    return None
+
 def compile_with_nuitka(code, requirements, target_platform, output_extension=".bin"):
     """Compile Python code with Nuitka"""
-    # Create status container with expanded height
-    status = st.empty()
+    # Create status container
     status_container = st.container()
     status_container.info("Starting compilation process...")
     
@@ -131,8 +182,7 @@ def compile_with_nuitka(code, requirements, target_platform, output_extension=".
     missing_deps = check_dependencies()
     if missing_deps:
         error_msg = f"Required dependencies are missing: {', '.join(missing_deps)}\n"
-        error_msg += "On Streamlit Cloud, these dependencies may not be available for standalone compilation.\n"
-        error_msg += "Try the non-standalone mode instead."
+        error_msg += "Some features may not work properly."
         status_container.warning(error_msg)
     
     # Create unique ID for this compilation
@@ -148,15 +198,14 @@ def compile_with_nuitka(code, requirements, target_platform, output_extension=".
     # Log system info
     system_info = f"""
     System Information:
-    - Python Version: {sys.version}
+    - Python: {sys.version.split()[0]}
     - Platform: {platform.platform()}
-    - Architecture: {platform.architecture()}
-    - Machine: {platform.machine()}
-    - Target Platform: {target_platform}
+    - Architecture: {platform.architecture()[0]}
+    - Target: {target_platform}
     """
     status_container.info(system_info)
     
-    # Handle Windows compilation - not supported on Streamlit Cloud
+    # Handle Windows compilation
     if target_platform == "windows":
         status_container.error("""
         ⚠️ **Windows compilation is not supported on Streamlit Cloud**
@@ -175,51 +224,37 @@ def compile_with_nuitka(code, requirements, target_platform, output_extension=".
     with open(script_path, "w") as f:
         f.write(code)
     
-    # If requirements provided, write them to requirements.txt
+    # Handle requirements
     install_result = "No Python requirements specified."
     if requirements.strip():
         req_path = os.path.join(job_dir, "requirements.txt")
         with open(req_path, "w") as f:
             f.write(requirements)
         
-        # Install requirements
         try:
             status_container.info("Installing Python requirements...")
-            install_process = subprocess.Popen(
+            install_process = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
+                capture_output=True,
+                text=True
             )
             
-            # Show installation progress in real-time
-            install_output = ""
-            for line in iter(install_process.stdout.readline, ''):
-                install_output += line
-                status_container.text(f"Python requirements installation:\n{install_output}")
-                
-            install_process.wait()
-            
             if install_process.returncode == 0:
-                status_container.success("Python requirements installed successfully.")
+                status_container.success("✅ Python requirements installed successfully.")
             else:
-                status_container.warning("Python requirements installation completed with warnings.")
+                status_container.warning("⚠️ Python requirements installation completed with warnings.")
             
-            install_result = f"Python requirements installation completed with return code: {install_process.returncode}"
-            status_container.info(f"{install_result}\n\nStarting compilation...")
+            install_result = f"Return code: {install_process.returncode}"
         except Exception as e:
-            install_result = f"Error installing Python requirements: {str(e)}"
+            install_result = f"Error: {str(e)}"
             status_container.error(install_result)
             return install_result, "", None, None
     
-    # Linux compilation
+    # Compilation
     try:
-        # Define the output filename with chosen extension
-        output_filename = f"user_script{output_extension}"
+        status_container.info("🔧 Starting compilation...")
         
-        # Try different compilation modes
+        # Try standalone first, then fallback to non-standalone
         compile_attempts = [
             {
                 "name": "Standalone",
@@ -227,9 +262,8 @@ def compile_with_nuitka(code, requirements, target_platform, output_extension=".
                     sys.executable, "-m", "nuitka",
                     "--standalone",
                     "--show-progress",
-                    "--show-modules",
+                    "--remove-output",
                     script_path,
-                    f"--output-filename={output_filename}",
                     f"--output-dir={output_dir}"
                 ]
             },
@@ -237,10 +271,9 @@ def compile_with_nuitka(code, requirements, target_platform, output_extension=".
                 "name": "Non-standalone",
                 "cmd": [
                     sys.executable, "-m", "nuitka",
-                    "--show-progress",
-                    "--show-modules",
+                    "--show-progress", 
+                    "--remove-output",
                     script_path,
-                    f"--output-filename={output_filename}",
                     f"--output-dir={output_dir}"
                 ]
             }
@@ -248,9 +281,12 @@ def compile_with_nuitka(code, requirements, target_platform, output_extension=".
         
         for attempt in compile_attempts:
             status_container.info(f"Attempting {attempt['name']} compilation...")
-            status_container.info(f"Command: {' '.join(attempt['cmd'])}")
             
-            # Start the process 
+            # Show command in collapsible section
+            with status_container.expander(f"Command for {attempt['name']}"):
+                st.code(' '.join(attempt['cmd']))
+            
+            # Run compilation
             process = subprocess.Popen(
                 attempt['cmd'],
                 stdout=subprocess.PIPE,
@@ -260,289 +296,254 @@ def compile_with_nuitka(code, requirements, target_platform, output_extension=".
                 universal_newlines=True
             )
             
-            # Create a progress bar
+            # Progress tracking
             progress_bar = st.progress(0)
-            
-            # Collect output with progress tracking
+            log_placeholder = st.empty()
             compile_output = ""
-            output_buffer = []
             line_count = 0
-            total_lines_estimate = 500
             
-            # Display compilation progress in real-time
+            # Real-time progress display
             for line in iter(process.stdout.readline, ''):
                 compile_output += line
-                output_buffer.append(line)
                 line_count += 1
                 
-                # Only keep the last 20 lines for display
-                if len(output_buffer) > 20:
-                    output_buffer.pop(0)
-                
-                # Estimate progress
-                progress = min(line_count / total_lines_estimate, 0.99)
+                # Update progress
+                progress = min(line_count / 200, 0.99)
                 progress_bar.progress(progress)
                 
-                # Update status with recent output
-                status_container.text(f"Compilation in progress ({attempt['name']})...\n\n{''.join(output_buffer)}")
+                # Show formatted log
+                formatted_log = format_compilation_log(compile_output)
+                with log_placeholder.container():
+                    with st.expander("📋 Compilation Log", expanded=False):
+                        st.text(formatted_log)
             
-            # Complete the progress bar
             progress_bar.progress(1.0)
-            
-            # Process has finished
             process.wait()
             
             status_container.info(f"Compilation finished with exit code: {process.returncode}")
             
-            # The binary path
-            binary_path = os.path.join(output_dir, output_filename)
+            # Find the compiled binary
+            output_filename = f"user_script{output_extension}"
+            binary_path = find_compiled_binary(output_dir, output_filename)
             
-            # Check if compilation was successful
-            if process.returncode == 0 and os.path.exists(binary_path):
-                # Execute file command to determine the type of the generated binary
-                file_process = subprocess.run(
-                    ["file", binary_path],
-                    capture_output=True,
-                    text=True
-                )
+            if process.returncode == 0 and binary_path:
+                # Get binary info
+                file_process = subprocess.run(["file", binary_path], capture_output=True, text=True)
                 binary_info = file_process.stdout
-                status_container.info(f"Binary information: {binary_info}")
                 
-                # Make the binary executable
+                # Make executable
                 os.chmod(binary_path, 0o755)
                 
-                # Fix line endings for shell scripts
-                if binary_path.endswith(".sh"):
-                    fix_line_endings(binary_path)
-                
-                status_container.success(f"Compilation complete ({attempt['name']})! You can download the executable now.")
-                
+                status_container.success(f"✅ {attempt['name']} compilation successful!")
                 return install_result, compile_output, binary_path, binary_info
             else:
-                status_container.warning(f"{attempt['name']} compilation failed, trying next method...")
+                status_container.warning(f"⚠️ {attempt['name']} compilation failed")
+                if attempt == compile_attempts[-1]:  # Last attempt
+                    return install_result, compile_output, None, "All compilation attempts failed"
                 continue
         
-        # If we get here, all attempts failed
-        status_container.error("All compilation attempts failed.")
-        return install_result, f"{compile_output}\n\nAll compilation attempts failed. See output for details.", None, "Binary compilation failed."
-        
     except Exception as e:
-        status_container.error(f"Error during compilation: {str(e)}")
-        return install_result, f"Error during compilation: {str(e)}", None, "Binary compilation failed."
+        status_container.error(f"❌ Error during compilation: {str(e)}")
+        return install_result, f"Error: {str(e)}", None, "Compilation error"
 
 # App title and description
 st.title("🚀 Nuitka Python Compiler (Streamlit Cloud)")
 st.markdown("""
-This tool compiles your Python code into executable files using Nuitka.
-**Note:** This version only supports Linux compilation due to Streamlit Cloud limitations.
+Convert your Python code into optimized executables using Nuitka.
+**Linux compilation only** (Wine not available on Streamlit Cloud).
 """)
 
-# Show dependency status
+# Dependency status
 missing_deps = check_dependencies()
 if missing_deps:
-    st.warning(f"""
-    ⚠️ **Missing Dependencies:** {', '.join(missing_deps)}
-    
-    Some dependencies are missing on Streamlit Cloud. Standalone compilation may not work, but non-standalone compilation should still be available.
-    """)
+    st.warning(f"⚠️ Missing dependencies: {', '.join(missing_deps)}")
 else:
-    st.success("✅ All required dependencies are available!")
+    st.success("✅ All required dependencies available!")
 
-# Create tabs for different sections
-tab1, tab2, tab3 = st.tabs(["Compiler", "How to Use", "About"])
+# Create tabs
+tab1, tab2, tab3 = st.tabs(["🔧 Compiler", "📖 How to Use", "ℹ️ About"])
 
 with tab1:
-    # Create columns for code and requirements
     col1, col2 = st.columns([2, 1])
     
     with col1:
         code = st.text_area(
             "Your Python Code",
-            value="# Enter your Python code here\n\nprint('Hello from compiled Python!')\nprint('This is running as a native executable')\n\n# This code will be compiled into an executable",
-            height=300
+            value="""# Your Python code here
+print('Hello from compiled Python!')
+print('This is running as a native executable')
+
+# For packages that need special handling during compilation:
+# - Use explicit imports instead of dynamic imports
+# - Avoid importing with sudo/elevated privileges
+# - Use standard library when possible""",
+            height=400
         )
     
     with col2:
-        # Python requirements
         requirements = st.text_area(
-            "Python Requirements",
-            placeholder="numpy==1.24.0\npandas==2.0.0\n# Add your Python dependencies here",
+            "Python Requirements (requirements.txt)",
+            placeholder="""# Add your Python dependencies here
+# Example:
+# numpy==1.24.0
+# pandas==2.0.0
+# requests>=2.28.0""",
             height=200
         )
         
-        # Target platform selection (Linux only)
-        st.info("🔓 **Platform:** Linux only")
-        st.caption("Windows compilation requires Wine, which is not available on Streamlit Cloud.")
+        st.info("🐧 **Platform:** Linux only")
         target_platform = "linux"
         
-        # Extension options
         output_extension = st.selectbox(
             "Output File Extension",
-            options=[".bin", ".sh"], 
-            index=0,
-            help="Choose the file extension for the compiled Linux executable."
+            options=[".bin", ".sh"],
+            index=0
         )
         
-        # Information about Windows compilation
-        with st.expander("❌ Windows Compilation (Not Available)"):
+        # Tips for packaging
+        with st.expander("💡 Tips for Better Packaging"):
             st.markdown("""
-            **Windows compilation is not supported on Streamlit Cloud because:**
-            - Wine (Windows compatibility layer) is not available
-            - System-level packages needed for cross-compilation cannot be installed
+            **For successful compilation:**
+            - Use explicit imports: `import module` instead of dynamic imports
+            - Avoid packages requiring sudo/root privileges
+            - Test with minimal dependencies first
+            - Some packages work better in non-standalone mode
             
-            **For Windows compilation, you can:**
-            1. Use the Docker/Hugging Face Spaces version of this tool
-            2. Compile locally on a Windows machine
-            3. Use a VM or container with Wine installed
+            **Common issues:**
+            - GUI libraries may not work in compiled form
+            - Some binary dependencies may be missing
+            - Network-dependent code may behave differently
             """)
     
     # Compile button
-    if st.button("Compile with Nuitka", type="primary"):
-        install_result, compile_output, binary_path, binary_info = compile_with_nuitka(code, requirements, target_platform, output_extension)
+    if st.button("🚀 Compile with Nuitka", type="primary"):
+        with st.spinner("Compiling..."):
+            install_result, compile_output, binary_path, binary_info = compile_with_nuitka(
+                code, requirements, target_platform, output_extension
+            )
         
-        # Display compilation details in an expander
-        with st.expander("Compilation Details", expanded=True):
+        # Results section
+        if binary_path and os.path.exists(binary_path):
+            st.success("🎉 Compilation successful!")
+            
+            # Stats
+            file_size = os.path.getsize(binary_path)
+            st.metric("File Size", f"{file_size / 1024 / 1024:.2f} MB")
+            
+            # Download
+            download_filename = f"compiled_program{output_extension}"
+            with open(binary_path, "rb") as f:
+                st.download_button(
+                    "⬇️ Download Compiled Program",
+                    data=f,
+                    file_name=download_filename,
+                    mime="application/octet-stream",
+                    type="primary"
+                )
+            
+            # Binary info
+            with st.expander("🔍 Binary Information"):
+                st.text(binary_info)
+            
+            # Test run
+            st.subheader("🧪 Test Run")
+            if st.button("Run Compiled Binary"):
+                with st.spinner("Executing..."):
+                    success, result = run_compiled_binary(binary_path)
+                
+                if success:
+                    st.success("✅ Execution successful!")
+                else:
+                    st.warning("⚠️ Execution completed with issues")
+                
+                st.text_area("Execution Output", result, height=200)
+        else:
+            st.error("❌ Compilation failed")
+        
+        # Detailed logs (collapsible)
+        with st.expander("📋 Detailed Logs", expanded=False):
             st.subheader("Requirements Installation")
             st.text(install_result)
             
-            st.subheader("Compilation Log")
-            st.text(compile_output)
-            
-            if binary_info:
-                st.subheader("Binary Information")
-                st.text(binary_info)
-        
-        # Download section
-        if binary_path and os.path.exists(binary_path):
-            st.success("✅ Compilation successful!")
-            
-            # Determine filename for download
-            download_filename = f"compiled_program{output_extension}"
-            
-            # Create download button
-            with open(binary_path, "rb") as f:
-                st.download_button(
-                    label=f"Download Compiled Program ({os.path.basename(binary_path)})", 
-                    data=f, 
-                    file_name=download_filename,
-                    mime="application/octet-stream"
-                )
-            
-            # Show Linux instructions
-            st.info(f"""
-            **To run on Linux:**
-            1. Save the file to your computer
-            2. Open a terminal in the directory where you saved it
-            3. Make it executable: `chmod +x {download_filename}`
-            4. Run it: `./{download_filename}`
-            
-            **To run on Windows with WSL:**
-            1. Install WSL (Windows Subsystem for Linux)
-            2. Copy the file to your WSL environment
-            3. Make it executable: `chmod +x {download_filename}`
-            4. Run it: `./{download_filename}`
-            """)
-            
-            # Run the binary directly
-            st.subheader("Test Run")
-            if st.button("Run Compiled Binary"):
-                st.write("Running the compiled binary... (output will appear below)")
-                with st.spinner("Executing..."):
-                    success, result = run_compiled_binary(binary_path)
-                    
-                    if success:
-                        st.success("Binary executed successfully!")
-                    else:
-                        st.warning("Binary execution encountered issues.")
-                    
-                    st.text_area("Execution Output", result, height=300)
-        else:
-            st.error("❌ Compilation failed or file creation failed.")
+            st.subheader("Compilation Output")
+            st.text(compile_output if compile_output else "No output available")
 
 with tab2:
-    st.header("How to Use the Compiled Binary")
+    st.header("📖 How to Use")
     
-    st.subheader("Linux Executables (.bin/.sh)")
-    st.markdown("""
-    1. Download the compiled executable (.bin or .sh)
-    2. Open a terminal in the directory where you saved it
-    3. Make the file executable: `chmod +x your_program.bin`
-    4. Run the program: `./your_program.bin`
+    st.subheader("🐧 Linux Executables")
+    st.code("""
+# Download the file
+# In terminal:
+chmod +x compiled_program.bin
+./compiled_program.bin
     """)
     
-    st.subheader("WSL Instructions for Linux Executables")
+    st.subheader("🪟 Windows WSL")
     st.markdown("""
-    If you're trying to run Linux executables on Windows:
-    
-    1. Install WSL from Microsoft Store
-    2. Open WSL
-    3. Copy the file to your WSL environment (not inside /mnt/c/)
-    4. Make it executable: `chmod +x your_program.bin`
-    5. Run it: `./your_program.bin`
+    1. Install Windows Subsystem for Linux (WSL)
+    2. Copy file to WSL environment
+    3. Make executable and run:
+    ```bash
+    chmod +x compiled_program.bin
+    ./compiled_program.bin
+    ```
     """)
     
-    st.subheader("About Compilation Modes")
+    st.subheader("⚙️ Compilation Modes")
     st.markdown("""
-    **Standalone:** Creates a self-contained executable with all dependencies
-    - Larger file size
-    - Runs on any system (no Python required)
-    - May fail on Streamlit Cloud due to missing dependencies
+    **Standalone Mode:**
+    - ✅ Self-contained executable
+    - ✅ No Python required on target system
+    - ❌ Larger file size
+    - ❌ May fail if dependencies are missing
     
-    **Non-standalone:** Creates an optimized executable that requires Python
-    - Smaller file size
-    - Requires Python to be installed on the target system
-    - More likely to work on Streamlit Cloud
+    **Non-standalone Mode:**
+    - ✅ Smaller file size
+    - ✅ More likely to compile successfully
+    - ❌ Requires Python on target system
+    - ❌ Less portable
     """)
 
 with tab3:
-    st.header("About Nuitka")
-    st.markdown("""
-    Nuitka is a Python compiler that converts Python code to C/C++ code, which is then compiled to a native executable.
+    st.header("ℹ️ About")
     
-    **Benefits of using Nuitka:**
-    - Improved performance
-    - Protection of source code
-    - Standalone applications (when dependencies allow)
-    - Reduced startup time
+    st.subheader("🔧 Nuitka Compiler")
+    st.markdown("""
+    Nuitka converts Python to optimized C++ code, then compiles to native executables.
+    
+    **Benefits:**
+    - 🚀 Faster execution
+    - 🔒 Source code protection
+    - 📦 Single-file distribution
+    - ⚡ Reduced startup time
     """)
     
-    st.header("About This Tool (Streamlit Cloud Version)")
+    st.subheader("☁️ Streamlit Cloud Limitations")
     st.markdown("""
-    **Features:**
-    - Linux compilation only
-    - Multiple compilation modes (standalone/non-standalone)
-    - Real-time progress tracking
-    - Test execution of compiled binaries
-    - Automatic dependency checking
+    **Supported:**
+    - ✅ Linux compilation
+    - ✅ Python packages via pip
+    - ✅ Basic system packages
     
-    **Limitations:**
-    - No Windows compilation (Wine not available)
-    - Limited system package installation
-    - Some dependencies may be missing for standalone mode
-    - No GUI applications support
-    
-    **For Windows compilation, use:**
-    - Local installation with Wine
-    - Docker/Hugging Face Spaces version
-    - Windows VM or container
+    **Not Supported:**
+    - ❌ Windows compilation (no Wine)
+    - ❌ Complex system dependencies
+    - ❌ GUI applications
+    - ❌ Root/sudo operations
     """)
     
-    # Dependency status
-    st.subheader("Current Environment Status")
-    missing_deps = check_dependencies()
-    if missing_deps:
-        st.error(f"Missing: {', '.join(missing_deps)}")
-    else:
-        st.success("All dependencies available")
+    st.subheader("🔧 Current Environment")
+    env_info = {
+        "Python Version": sys.version.split()[0],
+        "Platform": platform.platform(),
+        "Architecture": platform.architecture()[0],
+        "Dependencies": "✅ Available" if not missing_deps else f"❌ Missing: {', '.join(missing_deps)}"
+    }
     
-    # System info
-    system_info = f"""
-    - Python: {sys.version.split()[0]}
-    - Platform: {platform.platform()}
-    - Architecture: {platform.architecture()[0]}
-    """
-    st.code(system_info, language="text")
+    for key, value in env_info.items():
+        st.text(f"{key}: {value}")
 
 # Footer
 st.markdown("---")
-st.caption("Created by Claude 3.7 Sonnet | Streamlit Cloud Version")
+st.caption("🤖 Created by Claude 3.7 Sonnet | 🚀 Powered by Nuitka")
