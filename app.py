@@ -106,19 +106,36 @@ def install_system_packages(packages_content, status_container):
         
         status_container.info("Installing system packages...")
         
-        # Run install script
-        process = subprocess.run(
-            ["/app/install_packages.sh", temp_path],
-            capture_output=True,
-            text=True
-        )
+        # Install packages line by line (equivalent to install_packages.sh)
+        install_log = ""
+        with open(temp_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                status_container.info(f"Installing: {line}")
+                process = subprocess.run(
+                    ["sudo", "apt-get", "update", "-y"],
+                    capture_output=True,
+                    text=True
+                )
+                install_log += f"Update output: {process.stdout}\n{process.stderr}\n"
+                
+                process = subprocess.run(
+                    ["sudo", "apt-get", "install", "-y", line],
+                    capture_output=True,
+                    text=True
+                )
+                install_log += f"Install {line}: {process.stdout}\n{process.stderr}\n"
         
-        if process.returncode == 0:
-            status_container.success("System packages installed successfully.")
-            return f"System packages installation:\n{process.stdout}\n{process.stderr}"
-        else:
-            status_container.error("Failed to install system packages.")
-            return f"System packages installation failed:\n{process.stdout}\n{process.stderr}"
+        status_container.success("System packages installed successfully.")
+        return f"System packages installation:\n{install_log}"
+    
+    except Exception as e:
+        status_container.error(f"Failed to install system packages: {str(e)}")
+        return f"Error installing system packages: {str(e)}"
     
     finally:
         # Clean up
@@ -135,31 +152,121 @@ def compile_for_windows(code, output_dir, status_container):
         
         status_container.info("Starting Windows compilation...")
         
-        # Run Windows compilation script
+        # Start Xvfb if not running
+        xvfb_cmd = ["Xvfb", ":99", "-screen", "0", "1024x768x16"]
+        xvfb_proc = subprocess.Popen(xvfb_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        
+        # Set environment variables
+        env = os.environ.copy()
+        env.update({
+            "DISPLAY": ":99",
+            "WINEPREFIX": "/home/user/.wine",
+            "WINEDEBUG": "-all"
+        })
+        
         output_name = "program.exe"
-        process = subprocess.Popen(
-            ["/app/compile_windows.sh", script_path, output_dir, output_name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
-        
-        # Show compilation progress in real-time
         compile_output = ""
-        for line in iter(process.stdout.readline, ''):
-            compile_output += line
-            status_container.text(f"Windows compilation progress:\n{compile_output}")
         
-        process.wait()
+        try:
+            # Download Python installer if needed
+            python_installer = "/tmp/python-3.9.13-amd64.exe"
+            if not os.path.exists(python_installer):
+                status_container.info("Downloading Python installer...")
+                process = subprocess.run(
+                    ["wget", "-q", "-O", python_installer, "https://www.python.org/ftp/python/3.9.13/python-3.9.13-amd64.exe"],
+                    capture_output=True,
+                    text=True
+                )
+                compile_output += f"Download output: {process.stdout}\n{process.stderr}\n"
+            
+            # Install Python - will only run if needed
+            status_container.info("Installing Python in Wine...")
+            process = subprocess.run(
+                ["timeout", "180s", "wine", python_installer, "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_test=0"],
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            compile_output += f"Python install output: {process.stdout}\n{process.stderr}\n"
+            
+            # Find Python executable
+            python_paths = [
+                "C:\\users\\user\\AppData\\Local\\Programs\\Python\\Python39\\python.exe",
+                "C:\\Python39\\python.exe",
+                "C:\\windows\\py.exe"
+            ]
+            
+            python_path = None
+            for path in python_paths:
+                test_cmd = ["timeout", "30s", "wine", path, "--version"]
+                process = subprocess.run(test_cmd, env=env, capture_output=True, text=True)
+                if process.returncode == 0:
+                    python_path = path
+                    status_container.info(f"Found working Python at: {python_path}")
+                    break
+            
+            if not python_path:
+                status_container.error("Failed to find working Python installation")
+                return False, compile_output, None
+            
+            # Install Nuitka
+            status_container.info("Installing Nuitka in Wine Python...")
+            process = subprocess.run(
+                ["timeout", "180s", "wine", python_path, "-m", "pip", "install", "nuitka"],
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            compile_output += f"Nuitka install output: {process.stdout}\n{process.stderr}\n"
+            
+            # Run compilation
+            status_container.info("Compiling with Nuitka...")
+            compile_cmd = [
+                "timeout", "300s", "wine", python_path, "-m", "nuitka",
+                "--mingw64",
+                "--onefile",
+                "--standalone",
+                "--show-progress",
+                f"--output-dir={output_dir}",
+                f"--output-filename={output_name}",
+                script_path
+            ]
+            
+            # Create icon file if it doesn't exist
+            icon_path = "/app/icon.ico"
+            if os.path.exists(icon_path):
+                compile_cmd.insert(-1, f"--windows-icon-from-ico={icon_path}")
+            
+            process = subprocess.Popen(
+                compile_cmd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # Show compilation progress in real-time
+            for line in iter(process.stdout.readline, ''):
+                compile_output += line
+                status_container.text(f"Windows compilation progress:\n{compile_output}")
+            
+            process.wait()
+            
+            if process.returncode == 0:
+                status_container.success("Windows compilation successful!")
+                return True, compile_output, os.path.join(output_dir, output_name)
+            else:
+                status_container.error("Windows compilation failed.")
+                return False, compile_output, None
         
-        if process.returncode == 0:
-            status_container.success("Windows compilation successful!")
-            return True, compile_output, os.path.join(output_dir, output_name)
-        else:
-            status_container.error("Windows compilation failed.")
-            return False, compile_output, None
+        finally:
+            # Clean up Xvfb
+            if xvfb_proc:
+                xvfb_proc.terminate()
+                xvfb_proc.wait()
     
     except Exception as e:
         status_container.error(f"Windows compilation error: {str(e)}")
@@ -583,4 +690,4 @@ with tab3:
 
 # Footer
 st.markdown("---")
-st.caption("Created by Claude 3.7 Sonnet| Nuitka is a Python compiler that converts your Python code to native executables")
+st.caption("Created by Claude 3.7 Sonnet | Nuitka is a Python compiler that converts your Python code to native executables")
