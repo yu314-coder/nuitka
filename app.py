@@ -17,6 +17,12 @@ st.set_page_config(
     layout="wide"
 )
 
+# Initialize session state
+if 'compilation_results' not in st.session_state:
+    st.session_state.compilation_results = None
+if 'show_results' not in st.session_state:
+    st.session_state.show_results = False
+
 def ensure_dir(dir_path):
     """Ensure directory exists"""
     Path(dir_path).mkdir(parents=True, exist_ok=True)
@@ -288,7 +294,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
     
     # Handle Windows compilation
     if target_platform == "windows":
-        status_container.error("""
+        error_msg = """
         ⚠️ **Windows compilation is not supported on Streamlit Cloud**
         
         Reason: Windows compilation requires Wine (Windows compatibility layer), which is not available on Streamlit Cloud.
@@ -297,8 +303,16 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
         1. Use the Linux compilation option below
         2. Use the Docker/Hugging Face Spaces version for Windows compilation support
         3. Compile locally on a Windows machine or Windows VM
-        """)
-        return "Windows compilation not supported", "Windows compilation is not available on Streamlit Cloud due to the lack of Wine support.", None, None
+        """
+        status_container.error(error_msg)
+        return {
+            'success': False,
+            'error': error_msg,
+            'install_result': "Windows compilation not supported",
+            'compile_output': "Windows compilation is not available on Streamlit Cloud due to the lack of Wine support.",
+            'binary_path': None,
+            'binary_info': None
+        }
     
     # Install system packages if specified
     packages_result = "No system packages specified."
@@ -334,7 +348,14 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
         except Exception as e:
             install_result = f"Error: {str(e)}"
             status_container.error(install_result)
-            return install_result, "", None, None
+            return {
+                'success': False,
+                'error': str(e),
+                'install_result': install_result,
+                'compile_output': "",
+                'binary_path': None,
+                'binary_info': None
+            }
     
     # Compilation
     try:
@@ -441,16 +462,37 @@ Try running in an environment with Python {sys.version.split()[0]}.
 """
                 
                 status_container.success(f"✅ {attempt['name']} compilation successful!")
-                return result_summary, compile_output, binary_path, binary_info
+                return {
+                    'success': True,
+                    'install_result': result_summary,
+                    'compile_output': compile_output,
+                    'binary_path': binary_path,
+                    'binary_info': binary_info,
+                    'output_extension': output_extension
+                }
             else:
                 status_container.warning(f"⚠️ {attempt['name']} compilation failed")
                 if attempt == compile_attempts[-1]:  # Last attempt
-                    return f"All compilation attempts failed.\n\nSystem Packages: {packages_result}\nPython Requirements: {install_result}", compile_output, None, "All compilation attempts failed"
+                    return {
+                        'success': False,
+                        'error': "All compilation attempts failed",
+                        'install_result': f"All compilation attempts failed.\n\nSystem Packages: {packages_result}\nPython Requirements: {install_result}",
+                        'compile_output': compile_output,
+                        'binary_path': None,
+                        'binary_info': "All compilation attempts failed"
+                    }
                 continue
         
     except Exception as e:
         status_container.error(f"❌ Error during compilation: {str(e)}")
-        return f"Compilation error: {str(e)}", f"Error: {str(e)}", None, "Compilation error"
+        return {
+            'success': False,
+            'error': str(e),
+            'install_result': f"Compilation error: {str(e)}",
+            'compile_output': f"Error: {str(e)}",
+            'binary_path': None,
+            'binary_info': "Compilation error"
+        }
 
 # App title and description
 st.title("🚀 Nuitka Python Compiler (Streamlit Cloud)")
@@ -470,12 +512,87 @@ else:
 tab1, tab2, tab3 = st.tabs(["🔧 Compiler", "📖 How to Use", "ℹ️ About"])
 
 with tab1:
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        code = st.text_area(
-            "Your Python Code",
-            value="""# Your Python code here
+    # Show results if available
+    if st.session_state.show_results and st.session_state.compilation_results:
+        results = st.session_state.compilation_results
+        
+        if results['success']:
+            st.success("🎉 Compilation successful!")
+            
+            # Stats
+            if results['binary_path'] and os.path.exists(results['binary_path']):
+                file_size = os.path.getsize(results['binary_path'])
+                st.metric("File Size", f"{file_size / 1024 / 1024:.2f} MB")
+                
+                # Download
+                download_filename = f"compiled_program{results.get('output_extension', '.bin')}"
+                with open(results['binary_path'], "rb") as f:
+                    st.download_button(
+                        "⬇️ Download Compiled Program",
+                        data=f,
+                        file_name=download_filename,
+                        mime="application/octet-stream",
+                        type="primary"
+                    )
+                
+                # Binary info with troubleshooting tips
+                with st.expander("🔍 Binary Information & Troubleshooting"):
+                    st.text(results['binary_info'])
+                    st.markdown("""
+                    **If you encounter runtime errors:**
+                    
+                    1. **`_PyRuntime has different size` error:**
+                       - This happens when Python versions differ between compilation and runtime
+                       - Try running on a system with Python 3.12.x (same as Streamlit Cloud)
+                       - Use non-standalone mode for better compatibility
+                    
+                    2. **Segmentation fault:**
+                       - Usually caused by Python version mismatches
+                       - Try copying the binary to a native WSL directory (not /mnt/c/)
+                       - Ensure you're running in a proper Linux environment
+                    
+                    3. **File not found errors:**
+                       - Make sure the binary is executable: `chmod +x compiled_program.bin`
+                       - Check if you're in the correct directory
+                    """)
+                
+                # Test run
+                st.subheader("🧪 Test Run (on Streamlit Cloud)")
+                st.warning("Note: Testing on Streamlit Cloud may not reflect behavior on your local system")
+                if st.button("Run Compiled Binary", key="run_button"):
+                    with st.spinner("Executing..."):
+                        success, result = run_compiled_binary(results['binary_path'])
+                    
+                    if success:
+                        st.success("✅ Execution successful!")
+                    else:
+                        st.warning("⚠️ Execution completed with issues")
+                    
+                    st.text_area("Execution Output", result, height=200)
+        else:
+            st.error("❌ Compilation failed")
+        
+        # Detailed logs (collapsible)
+        with st.expander("📋 Detailed Logs", expanded=False):
+            st.subheader("Installation Results")
+            st.text(results['install_result'])
+            
+            st.subheader("Compilation Output")
+            st.text(results['compile_output'] if results['compile_output'] else "No output available")
+        
+        # Button to start new compilation
+        if st.button("🔄 Start New Compilation", type="secondary"):
+            st.session_state.compilation_results = None
+            st.session_state.show_results = False
+            st.rerun()
+    else:
+        # Show compilation interface
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            code = st.text_area(
+                "Your Python Code",
+                value="""# Your Python code here
 print('Hello from compiled Python!')
 print('This is running as a native executable')
 
@@ -483,135 +600,78 @@ print('This is running as a native executable')
 # - Use explicit imports instead of dynamic imports
 # - Avoid importing with sudo/elevated privileges
 # - Use standard library when possible""",
-            height=400
-        )
-    
-    with col2:
-        # Create tabs for requirements
-        req_tab1, req_tab2 = st.tabs(["Python Requirements", "System Packages"])
+                height=400
+            )
         
-        with req_tab1:
-            requirements = st.text_area(
-                "requirements.txt content",
-                placeholder="""# Add your Python dependencies here
+        with col2:
+            # Create tabs for requirements
+            req_tab1, req_tab2 = st.tabs(["Python Requirements", "System Packages"])
+            
+            with req_tab1:
+                requirements = st.text_area(
+                    "requirements.txt content",
+                    placeholder="""# Add your Python dependencies here
 # Example:
 # numpy==1.24.0
 # pandas==2.0.0
 # requests>=2.28.0""",
-                height=200
-            )
-        
-        with req_tab2:
-            packages = st.text_area(
-                "packages.txt content",
-                placeholder="""# Add system packages here (one per line)
+                    height=200
+                )
+            
+            with req_tab2:
+                packages = st.text_area(
+                    "packages.txt content",
+                    placeholder="""# Add system packages here (one per line)
 # Example:
 # build-essential
 # libssl-dev
 # ffmpeg
 # imagemagick""",
-                height=200,
-                help="System packages to install with apt-get. Note: Not all packages are available on Streamlit Cloud."
-            )
-        
-        st.info("🐧 **Platform:** Linux only")
-        target_platform = "linux"
-        
-        output_extension = st.selectbox(
-            "Output File Extension",
-            options=[".bin", ".sh"],
-            index=0
-        )
-        
-        # Tips for packaging
-        with st.expander("💡 Tips for Better Packaging"):
-            st.markdown("""
-            **For successful compilation:**
-            - Use explicit imports: `import module` instead of dynamic imports
-            - Test with minimal dependencies first
-            - Some packages work better in non-standalone mode
-            
-            **System Packages:**
-            - Only basic Debian packages are available
-            - Some packages may fail to install on Streamlit Cloud
-            - Failed packages won't prevent compilation from proceeding
-            
-            **Runtime Compatibility:**
-            - Binaries compiled on Streamlit Cloud work best on similar Ubuntu/Debian systems
-            - For WSL compatibility, ensure similar Python versions
-            - Use non-standalone mode for better cross-system compatibility
-            """)
-    
-    # Compile button
-    if st.button("🚀 Compile with Nuitka", type="primary"):
-        with st.spinner("Compiling..."):
-            install_result, compile_output, binary_path, binary_info = compile_with_nuitka(
-                code, requirements, packages, target_platform, output_extension
-            )
-        
-        # Results section
-        if binary_path and os.path.exists(binary_path):
-            st.success("🎉 Compilation successful!")
-            
-            # Stats
-            file_size = os.path.getsize(binary_path)
-            st.metric("File Size", f"{file_size / 1024 / 1024:.2f} MB")
-            
-            # Download
-            download_filename = f"compiled_program{output_extension}"
-            with open(binary_path, "rb") as f:
-                st.download_button(
-                    "⬇️ Download Compiled Program",
-                    data=f,
-                    file_name=download_filename,
-                    mime="application/octet-stream",
-                    type="primary"
+                    height=200,
+                    help="System packages to install with apt-get. Note: Not all packages are available on Streamlit Cloud."
                 )
             
-            # Binary info with troubleshooting tips
-            with st.expander("🔍 Binary Information & Troubleshooting"):
-                st.text(binary_info)
+            st.info("🐧 **Platform:** Linux only")
+            target_platform = "linux"
+            
+            output_extension = st.selectbox(
+                "Output File Extension",
+                options=[".bin", ".sh"],
+                index=0
+            )
+            
+            # Tips for packaging
+            with st.expander("💡 Tips for Better Packaging"):
                 st.markdown("""
-                **If you encounter runtime errors:**
+                **For successful compilation:**
+                - Use explicit imports: `import module` instead of dynamic imports
+                - Test with minimal dependencies first
+                - Some packages work better in non-standalone mode
                 
-                1. **`_PyRuntime has different size` error:**
-                   - This happens when Python versions differ between compilation and runtime
-                   - Try running on a system with Python 3.12.x (same as Streamlit Cloud)
-                   - Use non-standalone mode for better compatibility
+                **System Packages:**
+                - Only basic Debian packages are available
+                - Some packages may fail to install on Streamlit Cloud
+                - Failed packages won't prevent compilation from proceeding
                 
-                2. **Segmentation fault:**
-                   - Usually caused by Python version mismatches
-                   - Try copying the binary to a native WSL directory (not /mnt/c/)
-                   - Ensure you're running in a proper Linux environment
-                
-                3. **File not found errors:**
-                   - Make sure the binary is executable: `chmod +x compiled_program.bin`
-                   - Check if you're in the correct directory
+                **Runtime Compatibility:**
+                - Binaries compiled on Streamlit Cloud work best on similar Ubuntu/Debian systems
+                - For WSL compatibility, ensure similar Python versions
+                - Use non-standalone mode for better cross-system compatibility
                 """)
-            
-            # Test run
-            st.subheader("🧪 Test Run (on Streamlit Cloud)")
-            st.warning("Note: Testing on Streamlit Cloud may not reflect behavior on your local system")
-            if st.button("Run Compiled Binary"):
-                with st.spinner("Executing..."):
-                    success, result = run_compiled_binary(binary_path)
-                
-                if success:
-                    st.success("✅ Execution successful!")
-                else:
-                    st.warning("⚠️ Execution completed with issues")
-                
-                st.text_area("Execution Output", result, height=200)
-        else:
-            st.error("❌ Compilation failed")
         
-        # Detailed logs (collapsible)
-        with st.expander("📋 Detailed Logs", expanded=False):
-            st.subheader("Installation Results")
-            st.text(install_result)
-            
-            st.subheader("Compilation Output")
-            st.text(compile_output if compile_output else "No output available")
+        # Compile button
+        if st.button("🚀 Compile with Nuitka", type="primary"):
+            with st.spinner("Compiling..."):
+                results = compile_with_nuitka(
+                    code, requirements, packages, target_platform, output_extension
+                )
+                
+                # Store results in session state
+                st.session_state.compilation_results = results
+                st.session_state.show_results = True
+                
+                # Rerun to show results
+                st.rerun()
 
 with tab2:
     st.header("📖 How to Use")
