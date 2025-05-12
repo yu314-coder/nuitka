@@ -153,7 +153,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
         status_container.info("🔧 Starting compilation...")
         
         # Define compilation options based on selected mode
-        # All modes now produce binary executables only
+        # Fixed: Removed problematic --disable-plugins option
         compile_options = {
             "max_compatibility": {
                 "name": "Maximum Compatibility (Binary with Python embedding)",
@@ -162,7 +162,6 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                     "--standalone",  # Create self-contained executable
                     "--show-progress",
                     "--remove-output",
-                    "--disable-plugins",  # Prevent plugin conflicts
                     "--follow-imports",
                     script_path,
                     f"--output-dir={output_dir}"
