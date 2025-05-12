@@ -153,20 +153,21 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
         status_container.info("🔧 Starting compilation...")
         
         # Define compilation options based on selected mode
-        # Removed deprecated options like --nologo and updated for Nuitka 2.5+
+        # All modes now produce binary executables only
         compile_options = {
             "max_compatibility": {
-                "name": "Maximum Compatibility Mode",
+                "name": "Maximum Compatibility (Binary with Python embedding)",
                 "cmd": [
                     sys.executable, "-m", "nuitka",
-                    "--module",  # Create a module instead of executable
+                    "--standalone",  # Create self-contained executable
                     "--show-progress",
                     "--remove-output",
-                    "--no-pyi",
+                    "--disable-plugins",  # Prevent plugin conflicts
+                    "--follow-imports",
                     script_path,
                     f"--output-dir={output_dir}"
                 ],
-                "creates_runner": True
+                "creates_runner": False
             },
             "portable": {
                 "name": "Portable Non-Standalone",
@@ -180,10 +181,11 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                 "creates_runner": False
             },
             "standalone": {
-                "name": "Standalone (May have compatibility issues)",
+                "name": "Standalone",
                 "cmd": [
                     sys.executable, "-m", "nuitka",
                     "--standalone",
+                    "--onefile",  # Create single executable file
                     "--show-progress",
                     "--remove-output",
                     script_path,
@@ -237,50 +239,37 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
         
         status_container.info(f"Compilation finished with exit code: {process.returncode}")
         
-        # Handle different output types
-        if compilation_mode == "max_compatibility":
-            # Create wrapper script for module mode
-            module_name = os.path.splitext(os.path.basename(script_path))[0]
-            wrapper_script = os.path.join(output_dir, f"run_{module_name}.py")
+        # Find the compiled binary
+        output_filename = f"user_script{output_extension}"
+        binary_path = find_compiled_binary(output_dir, output_filename)
+        
+        # If not found with expected extension, try finding any executable
+        if not binary_path:
+            # Try common executable patterns
+            patterns = [
+                os.path.join(output_dir, "user_script"),
+                os.path.join(output_dir, "**", "user_script"),
+                os.path.join(output_dir, "user_script.bin"),
+                os.path.join(output_dir, "user_script.dist", "user_script.exe"),
+                os.path.join(output_dir, "user_script.dist", "user_script"),
+            ]
             
-            with open(wrapper_script, 'w') as f:
-                f.write(f"""#!/usr/bin/env python3
-import sys
-import os
-import importlib.util
-
-# Add current directory to Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-# Import and run the compiled module
-try:
-    spec = importlib.util.spec_from_file_location("{module_name}", "user_script.so")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-except Exception as e:
-    print(f"Error running compiled module: {{e}}")
-    sys.exit(1)
-""")
-            
-            # Find the compiled .so file
-            so_files = glob.glob(os.path.join(output_dir, "*.so"))
-            if so_files:
-                binary_path = wrapper_script
-                output_extension = ".py"
-            else:
-                binary_path = None
-        else:
-            # Find the compiled binary
-            output_filename = f"user_script{output_extension}"
-            binary_path = find_compiled_binary(output_dir, output_filename)
+            for pattern in patterns:
+                matches = glob.glob(pattern, recursive=True)
+                if matches:
+                    binary_path = matches[0]
+                    break
         
         if process.returncode == 0 and binary_path:
-            # Get binary info
-            if binary_path.endswith('.py'):
-                binary_info = f"Python wrapper script for compiled module"
-            else:
-                file_process = subprocess.run(["file", binary_path], capture_output=True, text=True)
-                binary_info = file_process.stdout
+            # Check if it's really a binary file
+            file_process = subprocess.run(["file", binary_path], capture_output=True, text=True)
+            binary_info = file_process.stdout
+            
+            # Rename to desired extension
+            if output_extension in ['.bin', '.sh'] and not binary_path.endswith(output_extension):
+                new_binary_path = binary_path + output_extension
+                shutil.move(binary_path, new_binary_path)
+                binary_path = new_binary_path
             
             # Make executable
             os.chmod(binary_path, 0o755)
@@ -325,7 +314,7 @@ IMPORTANT COMPATIBILITY NOTES:
         else:
             return {
                 'success': False,
-                'error': "Compilation failed",
+                'error': "Compilation failed or binary not found",
                 'install_result': f"Compilation failed.\n\nSystem Packages: {packages_result}\nPython Requirements: {install_result}",
                 'compile_output': compile_output,
                 'binary_path': None,
@@ -441,26 +430,14 @@ def run_compiled_binary(binary_path):
         os.chmod(binary_path, 0o755)
         
         # Run the binary and capture output in real-time with a timeout
-        if binary_path.endswith('.py'):
-            # For Python wrapper scripts
-            process = subprocess.Popen(
-                [sys.executable, binary_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-        else:
-            # For binary executables
-            process = subprocess.Popen(
-                [binary_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
+        process = subprocess.Popen(
+            [binary_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
         
         # Create a placeholder for real-time output
         output_placeholder = st.empty()
@@ -560,24 +537,37 @@ with tab1:
                         type="primary"
                     )
                 
-                # Special instructions based on compilation mode
+                # Instructions based on compilation mode
                 if results.get('compilation_mode') == 'max_compatibility':
                     st.info("""
-                    **Maximum Compatibility Mode Instructions:**
-                    1. Download the file
-                    2. Copy to your Linux/WSL native filesystem (not /mnt/c/)
-                    3. Run with: `python3 compiled_program.py`
-                    
-                    This mode creates a Python script that loads the compiled module,
-                    providing better compatibility across different systems.
-                    """)
-                else:
-                    st.info("""
-                    **Standard Binary Instructions:**
+                    **Maximum Compatibility Binary Instructions:**
                     1. Download the file
                     2. Copy to your Linux/WSL native filesystem (not /mnt/c/)
                     3. Make executable: `chmod +x compiled_program.bin`
                     4. Run: `./compiled_program.bin`
+                    
+                    This mode creates a self-contained binary that includes the Python runtime,
+                    providing better compatibility across different systems.
+                    """)
+                elif results.get('compilation_mode') == 'standalone':
+                    st.info("""
+                    **Standalone Binary Instructions:**
+                    1. Download the file
+                    2. Copy to your Linux/WSL native filesystem (not /mnt/c/)
+                    3. Make executable: `chmod +x compiled_program.bin`
+                    4. Run: `./compiled_program.bin`
+                    
+                    This is a fully self-contained executable that doesn't require Python installed.
+                    """)
+                else:
+                    st.info("""
+                    **Portable Binary Instructions:**
+                    1. Download the file
+                    2. Copy to your Linux/WSL native filesystem (not /mnt/c/)
+                    3. Make executable: `chmod +x compiled_program.bin`
+                    4. Run: `./compiled_program.bin`
+                    
+                    This binary requires Python to be installed on the target system.
                     """)
                 
                 # WSL-specific troubleshooting
@@ -685,22 +675,22 @@ print('This is running as a native executable')
             compilation_mode = st.selectbox(
                 "Compilation Mode",
                 options=[
-                    ("max_compatibility", "Maximum Compatibility (Recommended for WSL)"),
+                    ("max_compatibility", "Maximum Compatibility (Self-contained binary)"),
                     ("portable", "Portable Non-Standalone"), 
-                    ("standalone", "Standalone (May have issues)")
+                    ("standalone", "Standalone (Single-file executable)")
                 ],
                 format_func=lambda x: x[1],
                 help="""
-                - Maximum Compatibility: Creates a Python script that loads compiled modules - best for cross-system compatibility
+                - Maximum Compatibility: Creates a self-contained binary with embedded Python runtime
                 - Portable Non-Standalone: Creates optimized executable but requires Python on target system
-                - Standalone: Self-contained but may have Python version compatibility issues
+                - Standalone: Single-file self-contained executable
                 """
             )[0]
             
             output_extension = st.selectbox(
                 "Output File Extension",
-                options=[".bin", ".sh", ".py"] if compilation_mode == "max_compatibility" else [".bin", ".sh"],
-                index=2 if compilation_mode == "max_compatibility" else 0
+                options=[".bin", ".sh"],
+                index=0
             )
             
             # Show Python version info
@@ -756,9 +746,9 @@ chmod +x compiled_program.bin
     st.subheader("⚙️ Compilation Modes Explained")
     st.markdown("""
     **Maximum Compatibility Mode:**
-    - Creates a Python wrapper script (.py file)
+    - Creates a self-contained binary with embedded Python runtime
     - Best for cross-system compatibility
-    - Loads compiled modules through Python interpreter
+    - Larger file size but includes everything needed
     - Recommended for WSL users
     
     **Portable Non-Standalone:**
@@ -768,10 +758,10 @@ chmod +x compiled_program.bin
     - Good balance of compatibility and performance
     
     **Standalone:**
-    - Self-contained executable
+    - Single-file self-contained executable
     - No Python required on target
     - Largest file size
-    - May have compatibility issues across different Python versions
+    - May have compatibility issues across different systems
     """)
 
 with tab3:
