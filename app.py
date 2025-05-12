@@ -27,26 +27,6 @@ def ensure_dir(dir_path):
     """Ensure directory exists"""
     Path(dir_path).mkdir(parents=True, exist_ok=True)
 
-def fix_line_endings(file_path):
-    """Fix line endings to ensure Linux compatibility"""
-    try:
-        # Try to use dos2unix if available
-        result = subprocess.run(["which", "dos2unix"], capture_output=True)
-        if result.returncode == 0:
-            subprocess.run(["dos2unix", file_path], check=True, capture_output=True)
-            return True
-        else:
-            # Fallback: manually fix line endings
-            with open(file_path, 'rb') as f:
-                content = f.read()
-            content = content.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
-            with open(file_path, 'wb') as f:
-                f.write(content)
-            return True
-    except Exception as e:
-        st.warning(f"Could not fix line endings: {str(e)}")
-        return False
-
 def check_dependencies():
     """Check if required dependencies are available"""
     missing_deps = []
@@ -63,208 +43,11 @@ def check_dependencies():
     
     return missing_deps
 
-def run_compiled_binary(binary_path):
-    """Run the compiled binary and return the output"""
-    try:
-        # Skip execution for Windows binaries
-        if binary_path.endswith(".exe"):
-            return False, "Windows executables (.exe) cannot be run in this Linux environment."
-        
-        # Make the binary executable
-        os.chmod(binary_path, 0o755)
-        
-        # Fix line endings for shell scripts
-        if binary_path.endswith(".sh"):
-            fix_line_endings(binary_path)
-        
-        # Run the binary and capture output in real-time with a timeout
-        process = subprocess.Popen(
-            [binary_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
-        
-        # Create a placeholder for real-time output
-        output_placeholder = st.empty()
-        output_text = ""
-        
-        # Poll process for new output until finished
-        start_time = time.time()
-        while process.poll() is None:
-            # Check for timeout (10 seconds)
-            if time.time() - start_time > 10:
-                process.terminate()
-                return False, "Execution timed out after 10 seconds."
-            
-            # Read stdout
-            stdout_line = process.stdout.readline()
-            if stdout_line:
-                output_text += f"[STDOUT] {stdout_line}"
-                output_placeholder.text(output_text)
-            
-            # Read stderr
-            stderr_line = process.stderr.readline()
-            if stderr_line:
-                output_text += f"[STDERR] {stderr_line}"
-                output_placeholder.text(output_text)
-            
-            # Brief pause to prevent excessive CPU usage
-            time.sleep(0.1)
-        
-        # Get remaining output
-        stdout, stderr = process.communicate()
-        if stdout:
-            output_text += f"[STDOUT] {stdout}"
-        if stderr:
-            output_text += f"[STDERR] {stderr}"
-        
-        output_placeholder.text(output_text)
-        
-        return True, output_text
-    except Exception as e:
-        return False, f"Error running the binary: {str(e)}"
+def get_current_python_version():
+    """Get the current Python version for compatibility notes"""
+    return f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
 
-def install_system_packages(packages_content, status_container):
-    """Install system packages from packages.txt content"""
-    if not packages_content.strip():
-        return "No system packages specified."
-    
-    # Create temporary file
-    fd, temp_path = tempfile.mkstemp(suffix='.txt')
-    try:
-        with os.fdopen(fd, 'w') as tmp:
-            tmp.write(packages_content)
-        
-        status_container.info("Installing system packages...")
-        
-        # Install packages line by line
-        install_log = ""
-        failed_packages = []
-        successful_packages = []
-        
-        with open(temp_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                # Skip empty lines and comments
-                if not line or line.startswith('#'):
-                    continue
-                
-                status_container.info(f"Installing: {line}")
-                
-                # Try to install package
-                install_process = subprocess.run(
-                    ["apt-get", "update", "-qq"],
-                    capture_output=True,
-                    text=True
-                )
-                
-                install_process = subprocess.run(
-                    ["apt-get", "install", "-y", line],
-                    capture_output=True,
-                    text=True
-                )
-                
-                if install_process.returncode == 0:
-                    successful_packages.append(line)
-                    install_log += f"✅ Successfully installed: {line}\n"
-                else:
-                    failed_packages.append(line)
-                    install_log += f"❌ Failed to install: {line}\n"
-                    install_log += f"   Error: {install_process.stderr}\n"
-        
-        if successful_packages:
-            status_container.success(f"Successfully installed {len(successful_packages)} packages")
-        
-        if failed_packages:
-            status_container.warning(f"Failed to install {len(failed_packages)} packages. This may cause compilation issues.")
-        
-        summary = f"""
-System Packages Summary:
-✅ Successful: {', '.join(successful_packages)}
-❌ Failed: {', '.join(failed_packages)}
-
-Note: On Streamlit Cloud, some packages may not be available or may require different installation methods.
-"""
-        return summary + "\n" + install_log
-    
-    except Exception as e:
-        error_msg = f"Error installing system packages: {str(e)}"
-        status_container.error(error_msg)
-        return error_msg
-    
-    finally:
-        # Clean up
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-
-def format_compilation_log(log_text):
-    """Format compilation log for better readability"""
-    lines = log_text.splitlines()
-    formatted_lines = []
-    
-    for line in lines:
-        # Skip very repetitive lines
-        if "Setting 'RPATH' value" in line:
-            # Only show first few RPATH messages
-            if len([l for l in formatted_lines if "Setting 'RPATH'" in l]) < 3:
-                formatted_lines.append("  " + line)
-            elif len([l for l in formatted_lines if "Setting 'RPATH'" in l]) == 3:
-                formatted_lines.append("  ... (setting RPATH for multiple shared libraries)")
-        elif line.startswith("Nuitka"):
-            formatted_lines.append("✓ " + line)
-        elif "error" in line.lower() or "failed" in line.lower():
-            formatted_lines.append("❌ " + line)
-        elif "success" in line.lower():
-            formatted_lines.append("✅ " + line)
-        else:
-            formatted_lines.append("  " + line)
-    
-    return "\n".join(formatted_lines[-50:])  # Only show last 50 lines
-
-def find_compiled_binary(output_dir, output_filename):
-    """Find the compiled binary, checking different possible paths"""
-    # Try direct path first
-    direct_path = os.path.join(output_dir, output_filename)
-    if os.path.exists(direct_path):
-        return direct_path
-    
-    # Try in .dist folder (standalone builds)
-    dist_path = os.path.join(output_dir, "user_script.dist", output_filename)
-    if os.path.exists(dist_path):
-        return dist_path
-    
-    # Try using glob to find any executable
-    patterns = [
-        os.path.join(output_dir, "**", output_filename),
-        os.path.join(output_dir, "**", "user_script"),
-        os.path.join(output_dir, "**", "*.bin"),
-        os.path.join(output_dir, "**", "*.exe")
-    ]
-    
-    for pattern in patterns:
-        matches = glob.glob(pattern, recursive=True)
-        if matches:
-            return matches[0]
-    
-    return None
-
-def get_system_info():
-    """Get detailed system information for troubleshooting"""
-    info = {
-        "Python Version": sys.version,
-        "Platform": platform.platform(),
-        "Architecture": platform.architecture(),
-        "Machine": platform.machine(),
-        "Processor": platform.processor() or "Unknown",
-        "Python Path": sys.executable,
-        "Environment": "Streamlit Cloud" if "streamlit_app" in os.getcwd() else "Local/Other"
-    }
-    return info
-
-def compile_with_nuitka(code, requirements, packages, target_platform, output_extension=".bin"):
+def compile_with_nuitka(code, requirements, packages, target_platform, compilation_mode, output_extension=".bin"):
     """Compile Python code with Nuitka"""
     # Create status container
     status_container = st.container()
@@ -287,29 +70,19 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
     ensure_dir(job_dir)
     ensure_dir(output_dir)
     
-    # Log system info
-    system_info = get_system_info()
-    info_text = "\n".join([f"- {k}: {v}" for k, v in system_info.items()])
-    status_container.info(f"System Information:\n{info_text}")
-    
     # Handle Windows compilation
     if target_platform == "windows":
         error_msg = """
         ⚠️ **Windows compilation is not supported on Streamlit Cloud**
         
         Reason: Windows compilation requires Wine (Windows compatibility layer), which is not available on Streamlit Cloud.
-        
-        **Alternatives:**
-        1. Use the Linux compilation option below
-        2. Use the Docker/Hugging Face Spaces version for Windows compilation support
-        3. Compile locally on a Windows machine or Windows VM
         """
         status_container.error(error_msg)
         return {
             'success': False,
             'error': error_msg,
             'install_result': "Windows compilation not supported",
-            'compile_output': "Windows compilation is not available on Streamlit Cloud due to the lack of Wine support.",
+            'compile_output': error_msg,
             'binary_path': None,
             'binary_info': None
         }
@@ -361,127 +134,189 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
     try:
         status_container.info("🔧 Starting compilation...")
         
-        # Compilation attempts with different modes for better compatibility
-        compile_attempts = [
-            {
-                "name": "Standalone (Recommended for distribution)",
+        # Define compilation options based on selected mode
+        compile_options = {
+            "max_compatibility": {
+                "name": "Maximum Compatibility Mode",
+                "cmd": [
+                    sys.executable, "-m", "nuitka",
+                    "--module",  # Create a module instead of executable
+                    "--show-progress",
+                    "--remove-output",
+                    "--nologo",
+                    "--no-pyi",
+                    "--python-flag=no_site",
+                    "--python-flag=-S",  # Don't add site packages
+                    script_path,
+                    f"--output-dir={output_dir}"
+                ],
+                "creates_runner": True
+            },
+            "portable": {
+                "name": "Portable Non-Standalone",
+                "cmd": [
+                    sys.executable, "-m", "nuitka",
+                    "--show-progress",
+                    "--remove-output", 
+                    "--nologo",
+                    "--python-flag=no_site",
+                    script_path,
+                    f"--output-dir={output_dir}"
+                ],
+                "creates_runner": False
+            },
+            "standalone": {
+                "name": "Standalone (May have compatibility issues)",
                 "cmd": [
                     sys.executable, "-m", "nuitka",
                     "--standalone",
                     "--show-progress",
                     "--remove-output",
-                    "--python-flag=no_site",  # More portable
-                    script_path,
-                    f"--output-dir={output_dir}"
-                ]
-            },
-            {
-                "name": "Non-standalone (Better compatibility)",
-                "cmd": [
-                    sys.executable, "-m", "nuitka",
-                    "--show-progress", 
-                    "--remove-output",
+                    "--nologo",
                     "--python-flag=no_site",
                     script_path,
                     f"--output-dir={output_dir}"
-                ]
+                ],
+                "creates_runner": False
             }
-        ]
+        }
         
-        for attempt in compile_attempts:
-            status_container.info(f"Attempting {attempt['name']} compilation...")
+        selected_option = compile_options[compilation_mode]
+        status_container.info(f"Using {selected_option['name']}...")
+        
+        # Show command in collapsible section
+        with status_container.expander(f"Command for {selected_option['name']}"):
+            st.code(' '.join(selected_option['cmd']))
+        
+        # Run compilation
+        process = subprocess.Popen(
+            selected_option['cmd'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # Progress tracking
+        progress_bar = st.progress(0)
+        log_placeholder = st.empty()
+        compile_output = ""
+        line_count = 0
+        
+        # Real-time progress display
+        for line in iter(process.stdout.readline, ''):
+            compile_output += line
+            line_count += 1
             
-            # Show command in collapsible section
-            with status_container.expander(f"Command for {attempt['name']}"):
-                st.code(' '.join(attempt['cmd']))
+            # Update progress
+            progress = min(line_count / 200, 0.99)
+            progress_bar.progress(progress)
             
-            # Run compilation
-            process = subprocess.Popen(
-                attempt['cmd'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
+            # Show formatted log (last 20 lines)
+            lines = compile_output.splitlines()
+            formatted_log = '\n'.join(lines[-20:])
+            with log_placeholder.container():
+                with st.expander("📋 Compilation Log", expanded=False):
+                    st.text(formatted_log)
+        
+        progress_bar.progress(1.0)
+        process.wait()
+        
+        status_container.info(f"Compilation finished with exit code: {process.returncode}")
+        
+        # Handle different output types
+        if compilation_mode == "max_compatibility":
+            # Create wrapper script for module mode
+            module_name = os.path.splitext(os.path.basename(script_path))[0]
+            wrapper_script = os.path.join(output_dir, f"run_{module_name}.py")
             
-            # Progress tracking
-            progress_bar = st.progress(0)
-            log_placeholder = st.empty()
-            compile_output = ""
-            line_count = 0
+            with open(wrapper_script, 'w') as f:
+                f.write(f"""#!/usr/bin/env python3
+import sys
+import os
+import importlib.util
+
+# Add current directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import and run the compiled module
+try:
+    spec = importlib.util.spec_from_file_location("{module_name}", "user_script.so")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+except Exception as e:
+    print(f"Error running compiled module: {{e}}")
+    sys.exit(1)
+""")
             
-            # Real-time progress display
-            for line in iter(process.stdout.readline, ''):
-                compile_output += line
-                line_count += 1
-                
-                # Update progress
-                progress = min(line_count / 200, 0.99)
-                progress_bar.progress(progress)
-                
-                # Show formatted log
-                formatted_log = format_compilation_log(compile_output)
-                with log_placeholder.container():
-                    with st.expander("📋 Compilation Log", expanded=False):
-                        st.text(formatted_log)
-            
-            progress_bar.progress(1.0)
-            process.wait()
-            
-            status_container.info(f"Compilation finished with exit code: {process.returncode}")
-            
+            # Find the compiled .so file
+            so_files = glob.glob(os.path.join(output_dir, "*.so"))
+            if so_files:
+                binary_path = wrapper_script
+                output_extension = ".py"
+            else:
+                binary_path = None
+        else:
             # Find the compiled binary
             output_filename = f"user_script{output_extension}"
             binary_path = find_compiled_binary(output_dir, output_filename)
-            
-            if process.returncode == 0 and binary_path:
-                # Get binary info
+        
+        if process.returncode == 0 and binary_path:
+            # Get binary info
+            if binary_path.endswith('.py'):
+                binary_info = f"Python wrapper script for compiled module"
+            else:
                 file_process = subprocess.run(["file", binary_path], capture_output=True, text=True)
                 binary_info = file_process.stdout
-                
-                # Make executable
-                os.chmod(binary_path, 0o755)
-                
-                # Add system info to result
-                result_summary = f"""
+            
+            # Make executable
+            os.chmod(binary_path, 0o755)
+            
+            # Current Python version info
+            current_python = get_current_python_version()
+            
+            # Add system info to result
+            result_summary = f"""
 Compilation Details:
-- Mode: {attempt['name']}
+- Mode: {selected_option['name']}
 - Exit Code: {process.returncode}
 - Output Path: {binary_path}
-- File Size: {os.path.getsize(binary_path) / 1024 / 1024:.2f} MB
+- File Size: {os.path.getsize(binary_path) / 1024:.2f} KB
+- Compiled with Python: {current_python}
 
 System Packages: {packages_result}
 Python Requirements: {install_result}
 
 Binary Information: {binary_info}
 
-Note: If you encounter runtime errors like '_PyRuntime has different size', 
-this is usually due to Python version mismatches between compilation and runtime environments.
-Try running in an environment with Python {sys.version.split()[0]}.
+IMPORTANT COMPATIBILITY NOTES:
+- This binary was compiled with Python {current_python}
+- For best compatibility, run on systems with similar Python versions
+- For WSL: Copy to native filesystem (not /mnt/c/) before running
+- If you get '_PyRuntime' errors, the Python versions don't match
 """
-                
-                status_container.success(f"✅ {attempt['name']} compilation successful!")
-                return {
-                    'success': True,
-                    'install_result': result_summary,
-                    'compile_output': compile_output,
-                    'binary_path': binary_path,
-                    'binary_info': binary_info,
-                    'output_extension': output_extension
-                }
-            else:
-                status_container.warning(f"⚠️ {attempt['name']} compilation failed")
-                if attempt == compile_attempts[-1]:  # Last attempt
-                    return {
-                        'success': False,
-                        'error': "All compilation attempts failed",
-                        'install_result': f"All compilation attempts failed.\n\nSystem Packages: {packages_result}\nPython Requirements: {install_result}",
-                        'compile_output': compile_output,
-                        'binary_path': None,
-                        'binary_info': "All compilation attempts failed"
-                    }
-                continue
+            
+            status_container.success(f"✅ {selected_option['name']} compilation successful!")
+            return {
+                'success': True,
+                'install_result': result_summary,
+                'compile_output': compile_output,
+                'binary_path': binary_path,
+                'binary_info': binary_info,
+                'output_extension': output_extension,
+                'compilation_mode': compilation_mode,
+                'python_version': current_python
+            }
+        else:
+            return {
+                'success': False,
+                'error': "Compilation failed",
+                'install_result': f"Compilation failed.\n\nSystem Packages: {packages_result}\nPython Requirements: {install_result}",
+                'compile_output': compile_output,
+                'binary_path': None,
+                'binary_info': "Compilation failed"
+            }
         
     except Exception as e:
         status_container.error(f"❌ Error during compilation: {str(e)}")
@@ -494,11 +329,178 @@ Try running in an environment with Python {sys.version.split()[0]}.
             'binary_info': "Compilation error"
         }
 
+def install_system_packages(packages_content, status_container):
+    """Install system packages from packages.txt content"""
+    if not packages_content.strip():
+        return "No system packages specified."
+    
+    # Create temporary file
+    fd, temp_path = tempfile.mkstemp(suffix='.txt')
+    try:
+        with os.fdopen(fd, 'w') as tmp:
+            tmp.write(packages_content)
+        
+        status_container.info("Installing system packages...")
+        
+        # Install packages line by line
+        install_log = ""
+        failed_packages = []
+        successful_packages = []
+        
+        with open(temp_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                
+                status_container.info(f"Installing: {line}")
+                
+                # Try to install package
+                install_process = subprocess.run(
+                    ["apt-get", "update", "-qq"],
+                    capture_output=True,
+                    text=True
+                )
+                
+                install_process = subprocess.run(
+                    ["apt-get", "install", "-y", line],
+                    capture_output=True,
+                    text=True
+                )
+                
+                if install_process.returncode == 0:
+                    successful_packages.append(line)
+                    install_log += f"✅ Successfully installed: {line}\n"
+                else:
+                    failed_packages.append(line)
+                    install_log += f"❌ Failed to install: {line}\n"
+        
+        summary = f"""
+System Packages Summary:
+✅ Successful: {', '.join(successful_packages)}
+❌ Failed: {', '.join(failed_packages)}
+"""
+        return summary + "\n" + install_log
+    
+    except Exception as e:
+        error_msg = f"Error installing system packages: {str(e)}"
+        status_container.error(error_msg)
+        return error_msg
+    
+    finally:
+        # Clean up
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+def find_compiled_binary(output_dir, output_filename):
+    """Find the compiled binary, checking different possible paths"""
+    # Try direct path first
+    direct_path = os.path.join(output_dir, output_filename)
+    if os.path.exists(direct_path):
+        return direct_path
+    
+    # Try in .dist folder (standalone builds)
+    dist_path = os.path.join(output_dir, "user_script.dist", output_filename)
+    if os.path.exists(dist_path):
+        return dist_path
+    
+    # Try using glob to find any executable
+    patterns = [
+        os.path.join(output_dir, "**", output_filename),
+        os.path.join(output_dir, "**", "user_script"),
+        os.path.join(output_dir, "**", "*.bin"),
+        os.path.join(output_dir, "**", "*.exe")
+    ]
+    
+    for pattern in patterns:
+        matches = glob.glob(pattern, recursive=True)
+        if matches:
+            return matches[0]
+    
+    return None
+
+def run_compiled_binary(binary_path):
+    """Run the compiled binary and return the output"""
+    try:
+        # Make the binary executable
+        os.chmod(binary_path, 0o755)
+        
+        # Run the binary and capture output in real-time with a timeout
+        if binary_path.endswith('.py'):
+            # For Python wrapper scripts
+            process = subprocess.Popen(
+                [sys.executable, binary_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+        else:
+            # For binary executables
+            process = subprocess.Popen(
+                [binary_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+        
+        # Create a placeholder for real-time output
+        output_placeholder = st.empty()
+        output_text = ""
+        
+        # Poll process for new output until finished
+        start_time = time.time()
+        while process.poll() is None:
+            # Check for timeout (10 seconds)
+            if time.time() - start_time > 10:
+                process.terminate()
+                return False, "Execution timed out after 10 seconds."
+            
+            # Read stdout
+            stdout_line = process.stdout.readline()
+            if stdout_line:
+                output_text += f"[STDOUT] {stdout_line}"
+                output_placeholder.text(output_text)
+            
+            # Read stderr
+            stderr_line = process.stderr.readline()
+            if stderr_line:
+                output_text += f"[STDERR] {stderr_line}"
+                output_placeholder.text(output_text)
+            
+            # Brief pause to prevent excessive CPU usage
+            time.sleep(0.1)
+        
+        # Get remaining output
+        stdout, stderr = process.communicate()
+        if stdout:
+            output_text += f"[STDOUT] {stdout}"
+        if stderr:
+            output_text += f"[STDERR] {stderr}"
+        
+        output_placeholder.text(output_text)
+        
+        return True, output_text
+    except Exception as e:
+        return False, f"Error running the binary: {str(e)}"
+
 # App title and description
 st.title("🚀 Nuitka Python Compiler (Streamlit Cloud)")
 st.markdown("""
 Convert your Python code into optimized executables using Nuitka.
 **Linux compilation only** (Wine not available on Streamlit Cloud).
+""")
+
+# Important notice about WSL compatibility
+st.warning("""
+⚠️ **WSL Compatibility Issue Detected**
+
+If you're experiencing `_PyRuntime has different size` errors in WSL, this is due to Python version mismatches. 
+This app compiles with Python 3.12 - for best results, use a system with the same Python version.
 """)
 
 # Dependency status
@@ -519,10 +521,18 @@ with tab1:
         if results['success']:
             st.success("🎉 Compilation successful!")
             
+            # Show Python version compatibility info
+            st.info(f"""
+            **Compiled with Python {results.get('python_version', 'Unknown')}**
+            
+            For best compatibility, run on systems with the same Python version.
+            If you encounter runtime errors, it's likely due to Python version mismatches.
+            """)
+            
             # Stats
             if results['binary_path'] and os.path.exists(results['binary_path']):
                 file_size = os.path.getsize(results['binary_path'])
-                st.metric("File Size", f"{file_size / 1024 / 1024:.2f} MB")
+                st.metric("File Size", f"{file_size / 1024:.2f} KB")
                 
                 # Download
                 download_filename = f"compiled_program{results.get('output_extension', '.bin')}"
@@ -535,25 +545,47 @@ with tab1:
                         type="primary"
                     )
                 
-                # Binary info with troubleshooting tips
-                with st.expander("🔍 Binary Information & Troubleshooting"):
-                    st.text(results['binary_info'])
-                    st.markdown("""
-                    **If you encounter runtime errors:**
+                # Special instructions based on compilation mode
+                if results.get('compilation_mode') == 'max_compatibility':
+                    st.info("""
+                    **Maximum Compatibility Mode Instructions:**
+                    1. Download the file
+                    2. Copy to your Linux/WSL native filesystem (not /mnt/c/)
+                    3. Run with: `python3 compiled_program.py`
                     
-                    1. **`_PyRuntime has different size` error:**
-                       - This happens when Python versions differ between compilation and runtime
-                       - Try running on a system with Python 3.12.x (same as Streamlit Cloud)
-                       - Use non-standalone mode for better compatibility
+                    This mode creates a Python script that loads the compiled module,
+                    providing better compatibility across different systems.
+                    """)
+                else:
+                    st.info("""
+                    **Standard Binary Instructions:**
+                    1. Download the file
+                    2. Copy to your Linux/WSL native filesystem (not /mnt/c/)
+                    3. Make executable: `chmod +x compiled_program.bin`
+                    4. Run: `./compiled_program.bin`
+                    """)
+                
+                # WSL-specific troubleshooting
+                with st.expander("🔧 WSL Troubleshooting Guide"):
+                    st.markdown(f"""
+                    **If you get `_PyRuntime has different size` error:**
                     
-                    2. **Segmentation fault:**
-                       - Usually caused by Python version mismatches
-                       - Try copying the binary to a native WSL directory (not /mnt/c/)
-                       - Ensure you're running in a proper Linux environment
+                    1. **Check Python version in WSL:**
+                    ```bash
+                    python3 --version
+                    ```
                     
-                    3. **File not found errors:**
-                       - Make sure the binary is executable: `chmod +x compiled_program.bin`
-                       - Check if you're in the correct directory
+                    2. **This binary was compiled with Python {results.get('python_version', '3.12')}**
+                    
+                    3. **For maximum compatibility:**
+                       - Use the "Maximum Compatibility" mode when compiling
+                       - Copy the file to WSL filesystem: `cp /mnt/c/path/file ~/`
+                       - Run from Linux filesystem, not Windows filesystem
+                    
+                    4. **Alternative solutions:**
+                       - Install Python {results.get('python_version', '3.12')} in WSL
+                       - Use a Docker container with matching Python version
+                       - Compile locally on your WSL system
                     """)
                 
                 # Test run
@@ -615,7 +647,7 @@ print('This is running as a native executable')
 # numpy==1.24.0
 # pandas==2.0.0
 # requests>=2.28.0""",
-                    height=200
+                    height=150
                 )
             
             with req_tab2:
@@ -627,43 +659,43 @@ print('This is running as a native executable')
 # libssl-dev
 # ffmpeg
 # imagemagick""",
-                    height=200,
+                    height=150,
                     help="System packages to install with apt-get. Note: Not all packages are available on Streamlit Cloud."
                 )
             
             st.info("🐧 **Platform:** Linux only")
             target_platform = "linux"
             
+            # Compilation mode selection
+            compilation_mode = st.selectbox(
+                "Compilation Mode",
+                options=[
+                    ("max_compatibility", "Maximum Compatibility (Recommended for WSL)"),
+                    ("portable", "Portable Non-Standalone"), 
+                    ("standalone", "Standalone (May have issues)")
+                ],
+                format_func=lambda x: x[1],
+                help="""
+                - Maximum Compatibility: Creates a Python script that loads compiled modules - best for cross-system compatibility
+                - Portable Non-Standalone: Creates optimized executable but requires Python on target system
+                - Standalone: Self-contained but may have Python version compatibility issues
+                """
+            )[0]
+            
             output_extension = st.selectbox(
                 "Output File Extension",
-                options=[".bin", ".sh"],
-                index=0
+                options=[".bin", ".sh", ".py"] if compilation_mode == "max_compatibility" else [".bin", ".sh"],
+                index=2 if compilation_mode == "max_compatibility" else 0
             )
             
-            # Tips for packaging
-            with st.expander("💡 Tips for Better Packaging"):
-                st.markdown("""
-                **For successful compilation:**
-                - Use explicit imports: `import module` instead of dynamic imports
-                - Test with minimal dependencies first
-                - Some packages work better in non-standalone mode
-                
-                **System Packages:**
-                - Only basic Debian packages are available
-                - Some packages may fail to install on Streamlit Cloud
-                - Failed packages won't prevent compilation from proceeding
-                
-                **Runtime Compatibility:**
-                - Binaries compiled on Streamlit Cloud work best on similar Ubuntu/Debian systems
-                - For WSL compatibility, ensure similar Python versions
-                - Use non-standalone mode for better cross-system compatibility
-                """)
+            # Show Python version info
+            st.info(f"📍 Compiling with Python {get_current_python_version()}")
         
         # Compile button
         if st.button("🚀 Compile with Nuitka", type="primary"):
             with st.spinner("Compiling..."):
                 results = compile_with_nuitka(
-                    code, requirements, packages, target_platform, output_extension
+                    code, requirements, packages, target_platform, compilation_mode, output_extension
                 )
                 
                 # Store results in session state
@@ -684,50 +716,47 @@ chmod +x compiled_program.bin
 ./compiled_program.bin
     """)
     
-    st.subheader("🪟 Windows WSL")
+    st.subheader("🪟 Windows WSL - IMPORTANT!")
     st.markdown("""
-    1. Install Windows Subsystem for Linux (WSL)
-    2. **Important:** Copy file to WSL filesystem, not /mnt/c/
+    **The key to fixing WSL issues:**
+    
+    1. **Copy file to WSL filesystem (NOT Windows filesystem)**
     ```bash
-    # Good: Copy to WSL home directory
+    # DON'T run from here (Windows filesystem):
+    # /mnt/c/Users/username/Downloads/
+    
+    # DO copy to WSL filesystem first:
     cp /mnt/c/Users/username/Downloads/compiled_program.bin ~/
     cd ~
     chmod +x compiled_program.bin
     ./compiled_program.bin
-    
-    # Bad: Running from Windows filesystem
-    cd /mnt/c/Users/username/Downloads/
-    ./compiled_program.bin  # May cause errors
     ```
+    
+    2. **If still getting `_PyRuntime` errors:**
+       - Check Python version: `python3 --version`
+       - This app compiles with Python 3.12
+       - Use "Maximum Compatibility" mode for better cross-version support
     """)
     
-    st.subheader("⚙️ Compilation Modes")
+    st.subheader("⚙️ Compilation Modes Explained")
     st.markdown("""
-    **Standalone Mode:**
-    - ✅ Self-contained executable
-    - ✅ No Python required on target system
-    - ❌ Larger file size
-    - ❌ May have compatibility issues across different Linux versions
+    **Maximum Compatibility Mode:**
+    - Creates a Python wrapper script (.py file)
+    - Best for cross-system compatibility
+    - Loads compiled modules through Python interpreter
+    - Recommended for WSL users
     
-    **Non-standalone Mode:**
-    - ✅ Smaller file size
-    - ✅ Better cross-system compatibility
-    - ✅ More likely to run on different Python versions
-    - ❌ Requires Python on target system
-    """)
+    **Portable Non-Standalone:**
+    - Creates optimized binary
+    - Requires Python on target system
+    - Smaller file size
+    - Good balance of compatibility and performance
     
-    st.subheader("🔧 System Packages")
-    st.markdown("""
-    **Supported packages:**
-    - Most standard Debian packages from the bullseye repository
-    - Build tools: `build-essential`, `gcc`, `g++`
-    - Libraries: `libssl-dev`, `libffi-dev`, `libxml2-dev`
-    - Tools: `ffmpeg`, `imagemagick` (basic versions)
-    
-    **Limitations:**
-    - Some packages may not be available
-    - Complex packages requiring configuration may fail
-    - No GUI-related packages in headless environment
+    **Standalone:**
+    - Self-contained executable
+    - No Python required on target
+    - Largest file size
+    - May have compatibility issues across different Python versions
     """)
 
 with tab3:
@@ -740,51 +769,45 @@ with tab3:
     **Benefits:**
     - 🚀 Faster execution
     - 🔒 Source code protection
-    - 📦 Single-file distribution
+    - 📦 Single-file distribution (in standalone mode)
     - ⚡ Reduced startup time
     """)
     
-    st.subheader("☁️ Streamlit Cloud Environment")
-    system_info = get_system_info()
-    st.markdown("**Current Environment:**")
-    for key, value in system_info.items():
-        if key == "Python Version":
-            st.text(f"{key}: {value.split()[0]}")
-        else:
-            st.text(f"{key}: {value}")
+    st.subheader("⚠️ WSL Compatibility Issues")
+    st.error("""
+    **Common Issue: `_PyRuntime has different size`**
     
-    st.subheader("⚠️ Known Issues & Solutions")
-    st.markdown("""
-    **Common Runtime Errors:**
+    This error occurs when:
+    - Binary compiled with Python 3.12 (Streamlit Cloud)
+    - Running on system with different Python version
+    - Running from Windows filesystem (/mnt/c/) in WSL
     
-    1. **`_PyRuntime has different size in shared object`**
-       - **Cause:** Python version mismatch between compilation and runtime
-       - **Solution:** Use systems with similar Python versions (3.12.x)
-    
-    2. **Segmentation fault on WSL**
-       - **Cause:** Running binary from Windows filesystem (/mnt/c/)
-       - **Solution:** Copy binary to native WSL filesystem
-    
-    3. **Binary won't execute**
-       - **Cause:** Missing execute permissions
-       - **Solution:** `chmod +x compiled_program.bin`
-    
-    **Recommendations:**
-    - Use non-standalone mode for better compatibility
-    - Test on similar Ubuntu/Debian systems
-    - Keep Python versions consistent between compilation and runtime
+    **Solutions:**
+    - Use "Maximum Compatibility" mode
+    - Copy files to WSL native filesystem
+    - Match Python versions between compile/runtime environments
     """)
     
-    st.subheader("🔧 Current Status")
-    env_status = {
-        "Dependencies": "✅ Available" if not missing_deps else f"❌ Missing: {', '.join(missing_deps)}",
-        "Platform": "Linux (Streamlit Cloud)",
-        "Python": sys.version.split()[0],
-        "Nuitka": "✅ Installed"
-    }
+    st.subheader("☁️ Current Environment")
+    st.code(f"""
+    Python Version: {get_current_python_version()}
+    Platform: {platform.platform()}
+    Architecture: {platform.architecture()[0]}
+    Machine: {platform.machine()}
+    """)
     
-    for key, value in env_status.items():
-        st.text(f"{key}: {value}")
+    st.subheader("📋 Recommendations")
+    st.markdown("""
+    **For WSL Users:**
+    1. Always use "Maximum Compatibility" mode
+    2. Copy binaries to WSL filesystem before running
+    3. Check Python version compatibility
+    
+    **For General Use:**
+    1. Test with minimal dependencies first
+    2. Use non-standalone mode for better compatibility
+    3. Keep Python versions consistent
+    """)
 
 # Footer
 st.markdown("---")
