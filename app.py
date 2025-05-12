@@ -23,8 +23,19 @@ def ensure_dir(dir_path):
 def fix_line_endings(file_path):
     """Fix line endings to ensure Linux compatibility"""
     try:
-        subprocess.run(["dos2unix", file_path], check=True, capture_output=True)
-        return True
+        # Try to use dos2unix if available
+        result = subprocess.run(["which", "dos2unix"], capture_output=True)
+        if result.returncode == 0:
+            subprocess.run(["dos2unix", file_path], check=True, capture_output=True)
+            return True
+        else:
+            # Fallback: manually fix line endings
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            content = content.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+            with open(file_path, 'wb') as f:
+                f.write(content)
+            return True
     except Exception as e:
         st.warning(f"Could not fix line endings: {str(e)}")
         return False
@@ -93,192 +104,8 @@ def run_compiled_binary(binary_path):
     except Exception as e:
         return False, f"Error running the binary: {str(e)}"
 
-def install_system_packages(packages_content, status_container):
-    """Install system packages from packages.txt content"""
-    if not packages_content.strip():
-        return "No system packages specified."
-    
-    # Create temporary file
-    fd, temp_path = tempfile.mkstemp(suffix='.txt')
-    try:
-        with os.fdopen(fd, 'w') as tmp:
-            tmp.write(packages_content)
-        
-        status_container.info("Installing system packages...")
-        
-        # Install packages line by line (equivalent to install_packages.sh)
-        install_log = ""
-        with open(temp_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                # Skip empty lines and comments
-                if not line or line.startswith('#'):
-                    continue
-                
-                status_container.info(f"Installing: {line}")
-                process = subprocess.run(
-                    ["sudo", "apt-get", "update", "-y"],
-                    capture_output=True,
-                    text=True
-                )
-                install_log += f"Update output: {process.stdout}\n{process.stderr}\n"
-                
-                process = subprocess.run(
-                    ["sudo", "apt-get", "install", "-y", line],
-                    capture_output=True,
-                    text=True
-                )
-                install_log += f"Install {line}: {process.stdout}\n{process.stderr}\n"
-        
-        status_container.success("System packages installed successfully.")
-        return f"System packages installation:\n{install_log}"
-    
-    except Exception as e:
-        status_container.error(f"Failed to install system packages: {str(e)}")
-        return f"Error installing system packages: {str(e)}"
-    
-    finally:
-        # Clean up
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-
-def compile_for_windows(code, output_dir, status_container):
-    """Compile Python code for Windows using Wine and MinGW"""
-    # Create temporary script file
-    fd, script_path = tempfile.mkstemp(suffix='.py')
-    try:
-        with os.fdopen(fd, 'w') as tmp:
-            tmp.write(code)
-        
-        status_container.info("Starting Windows compilation...")
-        
-        # Start Xvfb if not running
-        xvfb_cmd = ["Xvfb", ":99", "-screen", "0", "1024x768x16"]
-        xvfb_proc = subprocess.Popen(xvfb_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
-        
-        # Set environment variables
-        env = os.environ.copy()
-        env.update({
-            "DISPLAY": ":99",
-            "WINEPREFIX": "/home/user/.wine",
-            "WINEDEBUG": "-all"
-        })
-        
-        output_name = "program.exe"
-        compile_output = ""
-        
-        try:
-            # Download Python installer if needed
-            python_installer = "/tmp/python-3.9.13-amd64.exe"
-            if not os.path.exists(python_installer):
-                status_container.info("Downloading Python installer...")
-                process = subprocess.run(
-                    ["wget", "-q", "-O", python_installer, "https://www.python.org/ftp/python/3.9.13/python-3.9.13-amd64.exe"],
-                    capture_output=True,
-                    text=True
-                )
-                compile_output += f"Download output: {process.stdout}\n{process.stderr}\n"
-            
-            # Install Python - will only run if needed
-            status_container.info("Installing Python in Wine...")
-            process = subprocess.run(
-                ["timeout", "180s", "wine", python_installer, "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_test=0"],
-                env=env,
-                capture_output=True,
-                text=True
-            )
-            compile_output += f"Python install output: {process.stdout}\n{process.stderr}\n"
-            
-            # Find Python executable
-            python_paths = [
-                "C:\\users\\user\\AppData\\Local\\Programs\\Python\\Python39\\python.exe",
-                "C:\\Python39\\python.exe",
-                "C:\\windows\\py.exe"
-            ]
-            
-            python_path = None
-            for path in python_paths:
-                test_cmd = ["timeout", "30s", "wine", path, "--version"]
-                process = subprocess.run(test_cmd, env=env, capture_output=True, text=True)
-                if process.returncode == 0:
-                    python_path = path
-                    status_container.info(f"Found working Python at: {python_path}")
-                    break
-            
-            if not python_path:
-                status_container.error("Failed to find working Python installation")
-                return False, compile_output, None
-            
-            # Install Nuitka
-            status_container.info("Installing Nuitka in Wine Python...")
-            process = subprocess.run(
-                ["timeout", "180s", "wine", python_path, "-m", "pip", "install", "nuitka"],
-                env=env,
-                capture_output=True,
-                text=True
-            )
-            compile_output += f"Nuitka install output: {process.stdout}\n{process.stderr}\n"
-            
-            # Run compilation
-            status_container.info("Compiling with Nuitka...")
-            compile_cmd = [
-                "timeout", "300s", "wine", python_path, "-m", "nuitka",
-                "--mingw64",
-                "--onefile",
-                "--standalone",
-                "--show-progress",
-                f"--output-dir={output_dir}",
-                f"--output-filename={output_name}",
-                script_path
-            ]
-            
-            # Create icon file if it doesn't exist
-            icon_path = "/app/icon.ico"
-            if os.path.exists(icon_path):
-                compile_cmd.insert(-1, f"--windows-icon-from-ico={icon_path}")
-            
-            process = subprocess.Popen(
-                compile_cmd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-            
-            # Show compilation progress in real-time
-            for line in iter(process.stdout.readline, ''):
-                compile_output += line
-                status_container.text(f"Windows compilation progress:\n{compile_output}")
-            
-            process.wait()
-            
-            if process.returncode == 0:
-                status_container.success("Windows compilation successful!")
-                return True, compile_output, os.path.join(output_dir, output_name)
-            else:
-                status_container.error("Windows compilation failed.")
-                return False, compile_output, None
-        
-        finally:
-            # Clean up Xvfb
-            if xvfb_proc:
-                xvfb_proc.terminate()
-                xvfb_proc.wait()
-    
-    except Exception as e:
-        status_container.error(f"Windows compilation error: {str(e)}")
-        return False, str(e), None
-    
-    finally:
-        # Clean up
-        if os.path.exists(script_path):
-            os.unlink(script_path)
-
 def compile_with_nuitka(code, requirements, packages, target_platform, output_extension=".bin"):
-    """Compile Python code with Nuitka without using threads"""
+    """Compile Python code with Nuitka"""
     # Create status container with expanded height
     status = st.empty()
     status_container = st.container()
@@ -305,10 +132,14 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
     """
     status_container.info(system_info)
     
-    # Install system packages if specified
+    # Handle Windows compilation - not supported on Streamlit Cloud
+    if target_platform == "windows":
+        status_container.error("Windows compilation is not supported on Streamlit Cloud. Please use Linux compilation instead.")
+        return "Windows compilation not supported", "Windows compilation is not available on Streamlit Cloud due to the lack of Wine support.", None, None
+    
+    # Handle system packages - not supported on Streamlit Cloud
     if packages.strip():
-        packages_result = install_system_packages(packages, status_container)
-        status_container.text(packages_result)
+        status_container.warning("System package installation is not supported on Streamlit Cloud. These packages will be ignored.")
     
     # Write code to a Python file
     script_path = os.path.join(job_dir, "user_script.py")
@@ -322,54 +153,37 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
         with open(req_path, "w") as f:
             f.write(requirements)
         
-        # Install requirements (only needed for Linux builds)
-        if target_platform == "linux":
-            try:
-                status_container.info("Installing Python requirements...")
-                install_process = subprocess.Popen(
-                    [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    universal_newlines=True
-                )
-                
-                # Show installation progress in real-time
-                install_output = ""
-                for line in iter(install_process.stdout.readline, ''):
-                    install_output += line
-                    status_container.text(f"Python requirements installation:\n{install_output}")
-                    
-                install_process.wait()
-                
-                if install_process.returncode == 0:
-                    status_container.success("Python requirements installed successfully.")
-                else:
-                    status_container.warning("Python requirements installation completed with warnings.")
-                
-                install_result = f"Python requirements installation completed with return code: {install_process.returncode}"
-                status_container.info(f"{install_result}\n\nStarting compilation...")
-            except Exception as e:
-                install_result = f"Error installing Python requirements: {str(e)}"
-                status_container.error(install_result)
-                return install_result, "", None, None
-    
-    # Handle Windows compilation separately
-    if target_platform == "windows":
-        success, win_output, win_binary = compile_for_windows(code, output_dir, status_container)
-        if success and win_binary:
-            # Get binary info
-            file_process = subprocess.run(
-                ["file", win_binary],
-                capture_output=True,
-                text=True
+        # Install requirements
+        try:
+            status_container.info("Installing Python requirements...")
+            install_process = subprocess.Popen(
+                [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
             )
-            binary_info = file_process.stdout
             
-            return install_result, win_output, win_binary, binary_info
-        else:
-            return install_result, win_output, None, "Windows binary compilation failed."
+            # Show installation progress in real-time
+            install_output = ""
+            for line in iter(install_process.stdout.readline, ''):
+                install_output += line
+                status_container.text(f"Python requirements installation:\n{install_output}")
+                
+            install_process.wait()
+            
+            if install_process.returncode == 0:
+                status_container.success("Python requirements installed successfully.")
+            else:
+                status_container.warning("Python requirements installation completed with warnings.")
+            
+            install_result = f"Python requirements installation completed with return code: {install_process.returncode}"
+            status_container.info(f"{install_result}\n\nStarting compilation...")
+        except Exception as e:
+            install_result = f"Error installing Python requirements: {str(e)}"
+            status_container.error(install_result)
+            return install_result, "", None, None
     
     # Continue with Linux compilation
     try:
@@ -470,10 +284,10 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
         return install_result, f"Error during compilation: {str(e)}", None, "Binary compilation failed."
 
 # App title and description
-st.title("🚀 Nuitka Python Compiler")
+st.title("🚀 Nuitka Python Compiler (Streamlit Cloud)")
 st.markdown("""
 This tool compiles your Python code into a single executable file using Nuitka.
-You can compile for Linux or Windows platforms.
+**Note:** This version only supports Linux compilation due to Streamlit Cloud limitations.
 """)
 
 # Create tabs for different sections
@@ -504,29 +318,23 @@ with tab1:
         with req_tab2:
             packages = st.text_area(
                 "packages.txt",
-                placeholder="# Add system packages that require apt-get install\nlibssl-dev\nlibffi-dev",
+                placeholder="# System packages are not supported on Streamlit Cloud\n# This field is disabled",
                 height=230,
-                help="These packages will be installed using sudo apt-get install"
+                disabled=True,
+                help="System package installation is not available on Streamlit Cloud"
             )
         
-        # Target platform selection
-        target_platform = st.radio(
-            "Target Platform",
-            options=["linux", "windows"],
+        # Target platform selection (Linux only)
+        st.info("🔓 **Platform:** Linux only (Windows compilation not available on Streamlit Cloud)")
+        target_platform = "linux"
+        
+        # Extension options
+        output_extension = st.selectbox(
+            "Output File Extension",
+            options=[".bin", ".sh"], 
             index=0,
-            help="Select the platform for which to compile the executable."
+            help="Choose the file extension for the compiled Linux executable."
         )
-        
-        # Extension options (only show for Linux)
-        if target_platform == "linux":
-            output_extension = st.selectbox(
-                "Output File Extension",
-                options=[".bin", ".sh"], 
-                index=0,
-                help="Choose the file extension for the compiled Linux executable."
-            )
-        else:
-            output_extension = ".exe"  # For Windows, always use .exe
     
     # Compile button
     if st.button("Compile with Nuitka", type="primary"):
@@ -548,11 +356,8 @@ with tab1:
         if binary_path and os.path.exists(binary_path):
             st.success("✅ Compilation successful!")
             
-            # Determine filename for download based on target platform
-            if target_platform == "linux":
-                download_filename = f"compiled_program{output_extension}"
-            else:
-                download_filename = "compiled_program.exe"
+            # Determine filename for download
+            download_filename = f"compiled_program{output_extension}"
             
             # Create download button
             with open(binary_path, "rb") as f:
@@ -563,46 +368,34 @@ with tab1:
                     mime="application/octet-stream"
                 )
             
-            # Show appropriate instructions based on target platform
-            if target_platform == "linux":
-                st.info(f"""
-                **To run on Linux:**
-                1. Save the file to your computer
-                2. Open a terminal in the directory where you saved it
-                3. Make it executable: `chmod +x {download_filename}`
-                4. Run it: `./{download_filename}`
-                
-                **To run on Windows with WSL:**
-                1. Install WSL (Windows Subsystem for Linux)
-                2. Copy the file to your WSL environment (not the Windows file system)
-                3. Make it executable: `chmod +x {download_filename}`
-                4. Run it: `./{download_filename}`
-                """)
-            else:
-                st.info(f"""
-                **To run on Windows:**
-                1. Save the .exe file to your computer
-                2. Double-click the file to run it
-                
-                **Note:** This is a Windows executable and will only run on Windows systems.
-                """)
+            # Show Linux instructions
+            st.info(f"""
+            **To run on Linux:**
+            1. Save the file to your computer
+            2. Open a terminal in the directory where you saved it
+            3. Make it executable: `chmod +x {download_filename}`
+            4. Run it: `./{download_filename}`
             
-            # Run the binary directly (only for Linux builds)
-            if target_platform == "linux":
-                st.subheader("Test Run")
-                if st.button("Run Compiled Binary"):
-                    st.write("Running the compiled binary... (output will appear below)")
-                    with st.spinner("Executing..."):
-                        success, result = run_compiled_binary(binary_path)
-                        
-                        if success:
-                            st.success("Binary executed successfully!")
-                        else:
-                            st.warning("Binary execution encountered issues.")
-                        
-                        st.text_area("Execution Output", result, height=300)
-            else:
-                st.warning("Windows executables cannot be test-run in this environment. Please download and run on a Windows system.")
+            **To run on Windows with WSL:**
+            1. Install WSL (Windows Subsystem for Linux)
+            2. Copy the file to your WSL environment (not the Windows file system)
+            3. Make it executable: `chmod +x {download_filename}`
+            4. Run it: `./{download_filename}`
+            """)
+            
+            # Run the binary directly
+            st.subheader("Test Run")
+            if st.button("Run Compiled Binary"):
+                st.write("Running the compiled binary... (output will appear below)")
+                with st.spinner("Executing..."):
+                    success, result = run_compiled_binary(binary_path)
+                    
+                    if success:
+                        st.success("Binary executed successfully!")
+                    else:
+                        st.warning("Binary execution encountered issues.")
+                    
+                    st.text_area("Execution Output", result, height=300)
         else:
             st.error("❌ Compilation failed or file creation failed.")
 
@@ -615,14 +408,6 @@ with tab2:
     2. Open a terminal in the directory where you saved it
     3. Make the file executable: `chmod +x your_program.bin`
     4. Run the program: `./your_program.bin`
-    """)
-    
-    st.subheader("Windows Executables (.exe)")
-    st.markdown("""
-    1. Download the compiled .exe file
-    2. Double-click to run it on any Windows system
-    
-    **Note:** The Windows executable is cross-compiled using Wine and MinGW. While this should work for most simple Python scripts, complex applications might have issues.
     """)
     
     st.subheader("WSL Instructions for Linux Executables")
@@ -665,27 +450,28 @@ with tab3:
     - Reduced startup time
     
     **Technical Details:**
-    - This tool can compile for both Linux and Windows platforms
+    - This tool compiles for Linux platforms only (on Streamlit Cloud)
     - Linux binaries are 64-bit ELF format
-    - Windows binaries are 64-bit PE format (.exe)
-    - Windows compilation uses cross-compilation via Wine and MinGW
     """)
     
     st.header("About This Tool")
     st.markdown("""
     This tool provides a simple web interface for compiling Python code with Nuitka in onefile mode.
     
-    **Features:**
-    - Compiles to single executable files (.bin, .sh, or .exe)
-    - Cross-platform compilation (Linux and Windows)
-    - Includes all dependencies 
-    - Supports system packages via packages.txt
+    **Features (Streamlit Cloud version):**
+    - Compiles to single executable files (.bin or .sh)
+    - Linux compilation only
+    - Includes all Python dependencies 
     - Real-time progress tracking
+    - Test execution of compiled binaries
     
     **Limitations:**
-    - Windows executables are cross-compiled and may not work with complex dependencies
-    - Very large projects might time out in the Hugging Face Space environment
+    - Only Linux compilation is supported
+    - System packages cannot be installed
+    - Windows compilation is not available
     - Some advanced Nuitka features may not be supported
+    
+    **Note:** For Windows compilation support, consider using the Docker/Hugging Face Spaces version of this tool.
     """)
 
 # Footer
