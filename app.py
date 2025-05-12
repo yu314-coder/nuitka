@@ -153,6 +153,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
         status_container.info("🔧 Starting compilation...")
         
         # Define compilation options with static linking for true portability
+        # Fixed: --static-libpython=yes (requires argument)
         compile_options = {
             "max_compatibility": {
                 "name": "Universal Binary (Static Python)",
@@ -160,7 +161,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                     sys.executable, "-m", "nuitka",
                     "--standalone",
                     "--onefile",  # Single portable file
-                    "--static-libpython",  # Static Python - this is KEY!
+                    "--static-libpython=yes",  # Static Python - this is KEY! (fixed with =yes)
                     "--show-progress",
                     "--remove-output",
                     "--follow-imports",
@@ -176,7 +177,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                     sys.executable, "-m", "nuitka",
                     "--show-progress",
                     "--remove-output",
-                    "--static-libpython",  # Still use static Python
+                    "--static-libpython=yes",  # Fixed with =yes
                     script_path,
                     f"--output-dir={output_dir}"
                 ],
@@ -188,7 +189,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                     sys.executable, "-m", "nuitka",
                     "--standalone",
                     "--onefile",
-                    "--static-libpython",  # Static Python for maximum compatibility
+                    "--static-libpython=yes",  # Fixed with =yes
                     "--show-progress",
                     "--remove-output",
                     script_path,
@@ -303,7 +304,7 @@ Python Requirements: {install_result}
 Binary Information: {binary_info}
 
 PORTABILITY NOTES:
-- This binary was compiled with --static-libpython for maximum portability
+- This binary was compiled with --static-libpython=yes for maximum portability
 - Static linking means it should work anywhere without Python version mismatches
 - No need to copy to WSL filesystem - it should work from /mnt/c/
 """
@@ -500,7 +501,7 @@ Convert your Python code into truly portable executables using Nuitka with stati
 st.success("""
 🎯 **Now with Static Linking!**
 
-This version uses `--static-libpython` to create truly portable binaries that:
+This version uses `--static-libpython=yes` to create truly portable binaries that:
 - Work on any Linux system regardless of Python version
 - Can be run from anywhere (including Windows filesystem in WSL)
 - No more `_PyRuntime` errors!
@@ -664,7 +665,7 @@ print('No more _PyRuntime errors! 🎉')""",
                 - Portable with Static Python: Static Python but requires some system libraries
                 - Standalone with Static Python: Self-contained with static Python
                 
-                All modes now use --static-libpython for maximum compatibility!
+                All modes now use --static-libpython=yes for maximum compatibility!
                 """
             )[0]
             
@@ -699,7 +700,7 @@ with tab2:
     st.success("""
     **The New Approach - Works Everywhere!**
     
-    With `--static-libpython`, your binaries now:
+    With `--static-libpython=yes`, your binaries now:
     - Work on any Linux system
     - Don't require specific Python versions  
     - Can run from any location (including /mnt/c/ in WSL)
@@ -738,7 +739,7 @@ with tab3:
     st.markdown("""
     **The key to the fix:**
     
-    - **`--static-libpython`**: This option statically links the Python runtime
+    - **`--static-libpython=yes`**: This option statically links the Python runtime
     - **`--onefile`**: Creates a single executable file
     - **`--lto=yes`**: Link-time optimization for better compatibility
     
