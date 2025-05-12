@@ -120,7 +120,7 @@ def run_compiled_binary(binary_path):
     except Exception as e:
         return False, f"Error running the binary: {str(e)}"
 
-def compile_with_nuitka(code, requirements, packages, target_platform, output_extension=".bin"):
+def compile_with_nuitka(code, requirements, target_platform, output_extension=".bin"):
     """Compile Python code with Nuitka"""
     # Create status container with expanded height
     status = st.empty()
@@ -131,10 +131,9 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
     missing_deps = check_dependencies()
     if missing_deps:
         error_msg = f"Required dependencies are missing: {', '.join(missing_deps)}\n"
-        error_msg += "On Streamlit Cloud, these dependencies are not available, so standalone compilation is not possible.\n"
-        error_msg += "Consider using a different deployment platform with full Linux environment support."
-        status_container.error(error_msg)
-        return "Missing dependencies", error_msg, None, None
+        error_msg += "On Streamlit Cloud, these dependencies may not be available for standalone compilation.\n"
+        error_msg += "Try the non-standalone mode instead."
+        status_container.warning(error_msg)
     
     # Create unique ID for this compilation
     job_id = str(uuid.uuid4())
@@ -159,12 +158,17 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
     
     # Handle Windows compilation - not supported on Streamlit Cloud
     if target_platform == "windows":
-        status_container.error("Windows compilation is not supported on Streamlit Cloud. Please use Linux compilation instead.")
+        status_container.error("""
+        ⚠️ **Windows compilation is not supported on Streamlit Cloud**
+        
+        Reason: Windows compilation requires Wine (Windows compatibility layer), which is not available on Streamlit Cloud.
+        
+        **Alternatives:**
+        1. Use the Linux compilation option below
+        2. Use the Docker/Hugging Face Spaces version for Windows compilation support
+        3. Compile locally on a Windows machine or Windows VM
+        """)
         return "Windows compilation not supported", "Windows compilation is not available on Streamlit Cloud due to the lack of Wine support.", None, None
-    
-    # Handle system packages - not supported on Streamlit Cloud
-    if packages.strip():
-        status_container.warning("System package installation is not supported on Streamlit Cloud. These packages will be ignored.")
     
     # Write code to a Python file
     script_path = os.path.join(job_dir, "user_script.py")
@@ -210,20 +214,18 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
             status_container.error(install_result)
             return install_result, "", None, None
     
-    # Continue with Linux compilation
+    # Linux compilation
     try:
         # Define the output filename with chosen extension
         output_filename = f"user_script{output_extension}"
         
-        # Try different compilation modes in order of preference
-        # First, try with onefile (if patchelf is available)
-        # Then try without onefile
+        # Try different compilation modes
         compile_attempts = [
             {
-                "name": "Standalone Onefile",
+                "name": "Standalone",
                 "cmd": [
                     sys.executable, "-m", "nuitka",
-                    "--onefile",
+                    "--standalone",
                     "--show-progress",
                     "--show-modules",
                     script_path,
@@ -265,7 +267,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
             compile_output = ""
             output_buffer = []
             line_count = 0
-            total_lines_estimate = 500  # Rough estimate
+            total_lines_estimate = 500
             
             # Display compilation progress in real-time
             for line in iter(process.stdout.readline, ''):
@@ -315,14 +317,13 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
                 
                 status_container.success(f"Compilation complete ({attempt['name']})! You can download the executable now.")
                 
-                # Return the binary directly
                 return install_result, compile_output, binary_path, binary_info
             else:
                 status_container.warning(f"{attempt['name']} compilation failed, trying next method...")
                 continue
         
         # If we get here, all attempts failed
-        status_container.error("All compilation attempts failed. Could not find executable file.")
+        status_container.error("All compilation attempts failed.")
         return install_result, f"{compile_output}\n\nAll compilation attempts failed. See output for details.", None, "Binary compilation failed."
         
     except Exception as e:
@@ -332,19 +333,20 @@ def compile_with_nuitka(code, requirements, packages, target_platform, output_ex
 # App title and description
 st.title("🚀 Nuitka Python Compiler (Streamlit Cloud)")
 st.markdown("""
-This tool compiles your Python code into a single executable file using Nuitka.
+This tool compiles your Python code into executable files using Nuitka.
 **Note:** This version only supports Linux compilation due to Streamlit Cloud limitations.
 """)
 
-# Check for missing dependencies at startup
+# Show dependency status
 missing_deps = check_dependencies()
 if missing_deps:
-    st.error(f"""
+    st.warning(f"""
     ⚠️ **Missing Dependencies:** {', '.join(missing_deps)}
     
-    Streamlit Cloud doesn't include all required system packages for Nuitka compilation.
-    You may still be able to compile using non-standalone mode, but standalone executables require these packages.
+    Some dependencies are missing on Streamlit Cloud. Standalone compilation may not work, but non-standalone compilation should still be available.
     """)
+else:
+    st.success("✅ All required dependencies are available!")
 
 # Create tabs for different sections
 tab1, tab2, tab3 = st.tabs(["Compiler", "How to Use", "About"])
@@ -361,27 +363,16 @@ with tab1:
         )
     
     with col2:
-        # Create tabs for requirements and packages
-        req_tab1, req_tab2 = st.tabs(["Python Requirements", "System Packages"])
-        
-        with req_tab1:
-            requirements = st.text_area(
-                "requirements.txt",
-                placeholder="numpy==1.24.0\npandas==2.0.0\n# Add your Python dependencies here",
-                height=230
-            )
-        
-        with req_tab2:
-            packages = st.text_area(
-                "packages.txt",
-                placeholder="# System packages are not supported on Streamlit Cloud\n# This field is disabled",
-                height=230,
-                disabled=True,
-                help="System package installation is not available on Streamlit Cloud"
-            )
+        # Python requirements
+        requirements = st.text_area(
+            "Python Requirements",
+            placeholder="numpy==1.24.0\npandas==2.0.0\n# Add your Python dependencies here",
+            height=200
+        )
         
         # Target platform selection (Linux only)
-        st.info("🔓 **Platform:** Linux only (Windows compilation not available on Streamlit Cloud)")
+        st.info("🔓 **Platform:** Linux only")
+        st.caption("Windows compilation requires Wine, which is not available on Streamlit Cloud.")
         target_platform = "linux"
         
         # Extension options
@@ -391,10 +382,23 @@ with tab1:
             index=0,
             help="Choose the file extension for the compiled Linux executable."
         )
+        
+        # Information about Windows compilation
+        with st.expander("❌ Windows Compilation (Not Available)"):
+            st.markdown("""
+            **Windows compilation is not supported on Streamlit Cloud because:**
+            - Wine (Windows compatibility layer) is not available
+            - System-level packages needed for cross-compilation cannot be installed
+            
+            **For Windows compilation, you can:**
+            1. Use the Docker/Hugging Face Spaces version of this tool
+            2. Compile locally on a Windows machine
+            3. Use a VM or container with Wine installed
+            """)
     
     # Compile button
     if st.button("Compile with Nuitka", type="primary"):
-        install_result, compile_output, binary_path, binary_info = compile_with_nuitka(code, requirements, packages, target_platform, output_extension)
+        install_result, compile_output, binary_path, binary_info = compile_with_nuitka(code, requirements, target_platform, output_extension)
         
         # Display compilation details in an expander
         with st.expander("Compilation Details", expanded=True):
@@ -434,7 +438,7 @@ with tab1:
             
             **To run on Windows with WSL:**
             1. Install WSL (Windows Subsystem for Linux)
-            2. Copy the file to your WSL environment (not the Windows file system)
+            2. Copy the file to your WSL environment
             3. Make it executable: `chmod +x {download_filename}`
             4. Run it: `./{download_filename}`
             """)
@@ -472,28 +476,22 @@ with tab2:
     
     1. Install WSL from Microsoft Store
     2. Open WSL
-    3. Copy the file to a native WSL directory (not inside /mnt/c/)
+    3. Copy the file to your WSL environment (not inside /mnt/c/)
     4. Make it executable: `chmod +x your_program.bin`
     5. Run it: `./your_program.bin`
-    
-    If you get "cannot execute binary file" error:
-    - Make sure you're running it with `./your_program.bin`
-    - Try fixing line endings: `dos2unix your_program.bin`
-    - Make sure you're running it from a Linux environment, not Windows cmd/PowerShell
     """)
     
-    st.subheader("About Onefile Mode")
+    st.subheader("About Compilation Modes")
     st.markdown("""
-    This tool uses Nuitka's "onefile" mode which:
+    **Standalone:** Creates a self-contained executable with all dependencies
+    - Larger file size
+    - Runs on any system (no Python required)
+    - May fail on Streamlit Cloud due to missing dependencies
     
-    1. Creates a single standalone executable
-    2. Contains all dependencies in one file
-    3. Unpacks necessary files to a temporary directory at runtime
-    4. Cleans up after execution
-    
-    This makes distribution simple - just share this one file!
-    
-    **Note:** On Streamlit Cloud, standalone mode may not work due to missing system dependencies.
+    **Non-standalone:** Creates an optimized executable that requires Python
+    - Smaller file size
+    - Requires Python to be installed on the target system
+    - More likely to work on Streamlit Cloud
     """)
 
 with tab3:
@@ -504,50 +502,47 @@ with tab3:
     **Benefits of using Nuitka:**
     - Improved performance
     - Protection of source code
-    - Standalone applications (no Python required on the target machine)
+    - Standalone applications (when dependencies allow)
     - Reduced startup time
-    
-    **Technical Details:**
-    - This tool compiles for Linux platforms only (on Streamlit Cloud)
-    - Linux binaries are 64-bit ELF format
     """)
     
-    st.header("About This Tool")
+    st.header("About This Tool (Streamlit Cloud Version)")
     st.markdown("""
-    This tool provides a simple web interface for compiling Python code with Nuitka in onefile mode.
-    
-    **Features (Streamlit Cloud version):**
-    - Compiles to single executable files (.bin or .sh)
+    **Features:**
     - Linux compilation only
-    - Includes all Python dependencies 
+    - Multiple compilation modes (standalone/non-standalone)
     - Real-time progress tracking
     - Test execution of compiled binaries
-    - Fallback to non-standalone mode if dependencies are missing
+    - Automatic dependency checking
     
     **Limitations:**
-    - Only Linux compilation is supported
-    - System packages cannot be installed
-    - Windows compilation is not available
-    - Some system dependencies (like patchelf) may be missing
-    - Some advanced Nuitka features may not be supported
+    - No Windows compilation (Wine not available)
+    - Limited system package installation
+    - Some dependencies may be missing for standalone mode
+    - No GUI applications support
     
-    **Note:** For Windows compilation support and full system dependency availability, consider using the Docker/Hugging Face Spaces version of this tool.
+    **For Windows compilation, use:**
+    - Local installation with Wine
+    - Docker/Hugging Face Spaces version
+    - Windows VM or container
     """)
     
     # Dependency status
-    st.subheader("System Dependencies Status")
+    st.subheader("Current Environment Status")
     missing_deps = check_dependencies()
     if missing_deps:
-        st.error(f"Missing dependencies: {', '.join(missing_deps)}")
-        st.markdown("""
-        **Impact:**
-        - Standalone compilation may fail
-        - Non-standalone compilation should still work
-        - Executables may require Python runtime on target system
-        """)
+        st.error(f"Missing: {', '.join(missing_deps)}")
     else:
-        st.success("All required dependencies are available!")
+        st.success("All dependencies available")
+    
+    # System info
+    system_info = f"""
+    - Python: {sys.version.split()[0]}
+    - Platform: {platform.platform()}
+    - Architecture: {platform.architecture()[0]}
+    """
+    st.code(system_info, language="text")
 
 # Footer
 st.markdown("---")
-st.caption("Created by Claude 3.7 Sonnet | Nuitka is a Python compiler that converts your Python code to native executables")
+st.caption("Created by Claude 3.7 Sonnet | Streamlit Cloud Version")
