@@ -47,11 +47,29 @@ def get_current_python_version():
     """Get the current Python version for compatibility notes"""
     return f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
 
+def get_nuitka_version():
+    """Get the current Nuitka version to handle different command line options"""
+    try:
+        result = subprocess.run([sys.executable, "-m", "nuitka", "--version"], 
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            version_line = result.stdout.strip().split('\n')[0]
+            # Extract version number from output like "Nuitka 2.5.0"
+            version = version_line.split()[-1]
+            return version
+        return "unknown"
+    except:
+        return "unknown"
+
 def compile_with_nuitka(code, requirements, packages, target_platform, compilation_mode, output_extension=".bin"):
     """Compile Python code with Nuitka"""
     # Create status container
     status_container = st.container()
     status_container.info("Starting compilation process...")
+    
+    # Check Nuitka version
+    nuitka_version = get_nuitka_version()
+    status_container.info(f"Using Nuitka version: {nuitka_version}")
     
     # Check dependencies first
     missing_deps = check_dependencies()
@@ -135,6 +153,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
         status_container.info("🔧 Starting compilation...")
         
         # Define compilation options based on selected mode
+        # Removed deprecated options like --nologo and updated for Nuitka 2.5+
         compile_options = {
             "max_compatibility": {
                 "name": "Maximum Compatibility Mode",
@@ -143,10 +162,7 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                     "--module",  # Create a module instead of executable
                     "--show-progress",
                     "--remove-output",
-                    "--nologo",
                     "--no-pyi",
-                    "--python-flag=no_site",
-                    "--python-flag=-S",  # Don't add site packages
                     script_path,
                     f"--output-dir={output_dir}"
                 ],
@@ -158,8 +174,6 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                     sys.executable, "-m", "nuitka",
                     "--show-progress",
                     "--remove-output", 
-                    "--nologo",
-                    "--python-flag=no_site",
                     script_path,
                     f"--output-dir={output_dir}"
                 ],
@@ -172,8 +186,6 @@ def compile_with_nuitka(code, requirements, packages, target_platform, compilati
                     "--standalone",
                     "--show-progress",
                     "--remove-output",
-                    "--nologo",
-                    "--python-flag=no_site",
                     script_path,
                     f"--output-dir={output_dir}"
                 ],
@@ -280,6 +292,7 @@ except Exception as e:
             result_summary = f"""
 Compilation Details:
 - Mode: {selected_option['name']}
+- Nuitka Version: {nuitka_version}
 - Exit Code: {process.returncode}
 - Output Path: {binary_path}
 - File Size: {os.path.getsize(binary_path) / 1024:.2f} KB
@@ -306,7 +319,8 @@ IMPORTANT COMPATIBILITY NOTES:
                 'binary_info': binary_info,
                 'output_extension': output_extension,
                 'compilation_mode': compilation_mode,
-                'python_version': current_python
+                'python_version': current_python,
+                'nuitka_version': nuitka_version
             }
         else:
             return {
@@ -524,6 +538,7 @@ with tab1:
             # Show Python version compatibility info
             st.info(f"""
             **Compiled with Python {results.get('python_version', 'Unknown')}**
+            **Using Nuitka {results.get('nuitka_version', 'Unknown')}**
             
             For best compatibility, run on systems with the same Python version.
             If you encounter runtime errors, it's likely due to Python version mismatches.
@@ -791,6 +806,7 @@ with tab3:
     st.subheader("☁️ Current Environment")
     st.code(f"""
     Python Version: {get_current_python_version()}
+    Nuitka Version: {get_nuitka_version()}
     Platform: {platform.platform()}
     Architecture: {platform.architecture()[0]}
     Machine: {platform.machine()}
