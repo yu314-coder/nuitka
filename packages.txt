@@ -1,0 +1,11 @@
+build-essential
+gcc
+g++
+ccache
+patchelf
+zip
+unzip
+file
+curl
+wget
+dos2unix
